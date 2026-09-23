@@ -1,0 +1,15 @@
+# Normalize line endings in the repository.
+* text=auto
+
+# Shell scripts must keep LF to run on Linux; batch files need CRLF on Windows.
+*.sh  text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.exe  binary
+*.zip  binary

@@ -1,0 +1,61 @@
+# --- Secrets and machine-specific settings ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# --- Node / frontend ---
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+
+# --- Fake camera: downloaded binaries and footage ---
+fake_camera/bin/*
+!fake_camera/bin/.gitkeep
+fake_camera/videos/*
+!fake_camera/videos/.gitkeep
+
+# --- Video files anywhere ---
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.m4v
+
+# --- Model weights and training/inference outputs ---
+*.pt
+*.pth
+*.onnx
+*.engine
+*.torchscript
+*_openvino_model/
+runs/
+
+# --- Runtime data: SQLite database, thumbnails, logs ---
+backend/data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+logs/
+*.log
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/

@@ -4,7 +4,7 @@ Detects whether each table in a restaurant is **AVAILABLE** or **OCCUPIED** from
 
 There is no live camera yet, so uploaded CCTV footage is played as a looping **fake RTSP camera** (MediaMTX + ffmpeg). The detection pipeline reads that RTSP stream exactly like a real camera, so moving to a real CCTV camera later is a config change, not a code change.
 
-> **Status:** work in progress. The environment setup is done; the fake camera, detection pipeline and dashboard are being built.
+> **Status:** work in progress. The fake RTSP camera works; the detection pipeline and dashboard are being built.
 
 ## How it works
 
@@ -108,7 +108,24 @@ All paths, ports, URLs and tuning values live in `backend/.env` or in the per-vi
 
 ## Running
 
-Run steps will be added here as each part is finished. The goal is a single `run_all.bat` that starts the backend (which starts MediaMTX by itself) and the dashboard.
+### Fake CCTV camera (manual)
+
+1. Copy a restaurant video (`.mp4`, `.avi`, `.mov` or `.mkv`) into `fake_camera/videos/`.
+2. Start the camera from the project folder:
+
+   ```powershell
+   fake_camera\start_camera.bat my_video.mp4      # Windows
+   ./fake_camera/start_camera.sh my_video.mp4     # Linux / macOS
+   ```
+
+   Without a file name it lists the videos in `fake_camera/videos/`; a path to a video anywhere else works too. The script starts MediaMTX (unless one is already running) and streams the video to `rtsp://localhost:8554/cam1` in real time, looping forever. It prints the exact ffmpeg command it runs. `Ctrl+C` stops everything.
+3. Open the stream in a player:
+   - **VLC:** Media → Open Network Stream → `rtsp://localhost:8554/cam1`
+   - **ffplay** (installed with ffmpeg): `ffplay -rtsp_transport tcp rtsp://localhost:8554/cam1`
+
+The stream URL and port come from `FAKE_CAMERA_RTSP_URL` in `backend/.env`. Only RTSP over TCP is enabled in `fake_camera/mediamtx.yml`. If Windows asks for firewall access for MediaMTX, **Cancel** keeps the camera reachable from this computer only.
+
+More run steps will be added as each part is finished. The goal is a single `run_all.bat` that starts the backend (which starts MediaMTX by itself) and the dashboard.
 
 ## Project structure
 
@@ -116,8 +133,12 @@ Run steps will be added here as each part is finished. The goal is a single `run
 .
 ├── fake_camera/
 │   ├── download_mediamtx.py   # fetches the MediaMTX binary into bin/
+│   ├── mediamtx.yml           # MediaMTX config (RTSP over TCP only)
+│   ├── start_camera.py        # loops a video as a live RTSP stream
+│   ├── start_camera.bat       # Windows launcher
+│   ├── start_camera.sh        # Linux / macOS launcher
 │   ├── bin/                   # MediaMTX executable (gitignored)
-│   └── videos/                # uploaded footage (gitignored)
+│   └── videos/                # footage (gitignored)
 ├── backend/
 │   ├── app/                   # FastAPI application
 │   ├── configs/               # <video_id>.json table configs

@@ -1,0 +1,32 @@
+# Backend Python dependencies (direct dependencies, pinned).
+# Tested with Python 3.14 on Windows 11.
+#
+#   python -m pip install -r backend/requirements.txt
+#
+# PyTorch: the default PyPI wheel on Windows is CPU-only, which is the default
+# for this project. To use an NVIDIA GPU, first install the CUDA build of the
+# SAME torch/torchvision versions (pick the command for your CUDA version at
+# https://pytorch.org/get-started/locally/), then run the command above.
+# The app switches to the GPU automatically when CUDA is available.
+
+# --- Detection, tracking, vision ---
+ultralytics==8.4.160
+lap==0.5.13                 # used by the ByteTrack tracker
+torch==2.14.0
+torchvision==0.29.0
+supervision==0.30.5
+opencv-python==5.0.0.93
+
+# --- API server ---
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+python-multipart==0.0.32    # multipart video uploads
+
+# --- Utilities ---
+loguru==0.7.3
+
+# --- Tests ---
+pytest==9.1.1
+httpx==0.28.1               # required by FastAPI's TestClient

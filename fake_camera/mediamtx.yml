@@ -1,0 +1,42 @@
+# MediaMTX configuration for the fake CCTV camera (MediaMTX v1.21 or newer).
+#
+# Only the RTSP server is enabled, over TCP. ffmpeg publishes the looping video
+# to rtsp://<host>:<port>/<path> and the detection pipeline reads it back, the
+# same way it would read a real camera. The start scripts and the backend set
+# rtspAddress from FAKE_CAMERA_RTSP_URL in backend/.env (through the
+# MTX_RTSPADDRESS environment variable), so change the port there, not here.
+
+logLevel: info
+
+# Anyone who can reach the server may publish and read any path. The server
+# listens on all interfaces (IPv4 and IPv6) so "localhost" URLs work for every
+# client. If Windows asks about firewall access, "Cancel" keeps it reachable
+# from this computer only.
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+      - action: read
+
+# RTSP over TCP only: no UDP ports to open, and TCP is what the pipeline uses.
+rtsp: true
+rtspTransports: [tcp]
+rtspEncryption: "no"
+rtspAddress: :8554
+
+# Everything else is turned off.
+api: false
+metrics: false
+pprof: false
+playback: false
+rtmp: false
+hls: false
+webrtc: false
+srt: false
+moq: false
+
+paths:
+  # Accept any path name, for example /cam1.
+  all_others:

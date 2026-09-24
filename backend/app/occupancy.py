@@ -90,9 +90,22 @@ class OccupancyTracker:
     """Runs the occupancy state machine for a set of tables."""
 
     def __init__(self, tables: list[TableDef], settings: OccupancySettings) -> None:
-        self.tables = tables
+        self.tables: list[TableDef] = []
         self.settings = settings
-        anchor = anchor_position(settings.reference_point)
+        self._zones: dict[str, sv.PolygonZone] = {}
+        self._states: dict[str, TableState] = {}
+        self.set_tables(tables, settings)
+
+    def set_tables(self, tables: list[TableDef], settings: OccupancySettings | None = None) -> None:
+        """Switch to new table outlines (and settings) without losing state.
+
+        Tables whose ID is kept keep their status, timers and statistics, so
+        editing an outline does not reset an occupied table. New tables start
+        AVAILABLE; removed tables are forgotten.
+        """
+        if settings is not None:
+            self.settings = settings
+        anchor = anchor_position(self.settings.reference_point)
         self._zones = {
             table.id: sv.PolygonZone(
                 polygon=np.rint(np.array(table.polygon)).astype(int),
@@ -100,7 +113,11 @@ class OccupancyTracker:
             )
             for table in tables
         }
-        self._states = {table.id: TableState(table_id=table.id, name=table.name) for table in tables}
+        old_states = self._states
+        self._states = {table.id: old_states.get(table.id) or TableState(table.id, table.name) for table in tables}
+        for table in tables:
+            self._states[table.id].name = table.name
+        self.tables = list(tables)
 
     @property
     def states(self) -> list[TableState]:

@@ -179,6 +179,23 @@ def test_occupied_seconds_includes_the_session_in_progress() -> None:
     assert tracker.states[0].occupied_seconds(now=8.0) == pytest.approx(8.0)
 
 
+def test_editing_tables_keeps_the_state_of_kept_tables() -> None:
+    tracker = OccupancyTracker([TABLE_1, TABLE_2], settings())
+    run(tracker, people(AT_TABLE_1), 0, 6)
+    assert status(tracker, "T1") is OCCUPIED
+
+    renamed = TABLE_1.model_copy(update={"name": "Window table"})
+    table_3 = TableDef(id="T3", name="Table 3", polygon=[(500, 100), (600, 100), (600, 200), (500, 200)])
+    tracker.set_tables([renamed, table_3], settings(enter_seconds=2))
+
+    assert [s.table_id for s in tracker.states] == ["T1", "T3"]  # T2 is gone
+    table_1 = tracker.states[0]
+    assert table_1.status is OCCUPIED and table_1.name == "Window table" and table_1.session_count == 1
+    assert tracker.states[1].status is AVAILABLE
+    assert tracker.settings.enter_seconds == 2
+    assert tracker.update(people(AT_TABLE_1), now=6.5) == []  # no spurious events
+
+
 def test_polygon_scaling() -> None:
     config = TableConfig(
         video_id="cam",

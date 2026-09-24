@@ -69,7 +69,7 @@ def test_file_plays_every_frame_in_real_time_then_ends(sample_video: Path) -> No
             indexes.append(frame_index(frame))
         elapsed = time.monotonic() - start
         assert source.status is SourceStatus.ENDED
-        assert not source.is_alive()
+        assert not source.is_alive()  # right away, even while the file is still being closed
     assert indexes == list(range(FRAME_COUNT))  # each frame once, in order
     assert elapsed >= 0.8 * (FRAME_COUNT - 1) / FPS  # paced at the file's frame rate
 

@@ -1,0 +1,76 @@
+"""SQLite storage for table status-change events.
+
+One connection shared by the pipeline thread and the API, guarded by a lock.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import threading
+from pathlib import Path
+
+from app.occupancy import OccupancyEvent
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id    TEXT,
+    table_id    TEXT NOT NULL,
+    table_name  TEXT NOT NULL,
+    old_status  TEXT NOT NULL,
+    new_status  TEXT NOT NULL,
+    timestamp   REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS events_by_time ON events (timestamp);
+CREATE INDEX IF NOT EXISTS events_by_video ON events (video_id, timestamp);
+"""
+
+
+class Database:
+    """Thin wrapper around the SQLite file."""
+
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        with self._lock, self._conn:
+            self._conn.execute("PRAGMA journal_mode=WAL")  # readers do not block the writer
+            self._conn.executescript(_SCHEMA)
+
+    def add_events(self, video_id: str | None, events: list[OccupancyEvent],
+                   table_names: dict[str, str]) -> list[dict]:
+        """Store status changes; returns them as rows (with their new IDs)."""
+        rows = []
+        with self._lock, self._conn:
+            for event in events:
+                row = {
+                    "video_id": video_id,
+                    "table_id": event.table_id,
+                    "table_name": table_names.get(event.table_id, event.table_id),
+                    "old_status": event.old_status.value,
+                    "new_status": event.new_status.value,
+                    "timestamp": event.timestamp,
+                }
+                cursor = self._conn.execute(
+                    "INSERT INTO events (video_id, table_id, table_name, old_status, new_status, timestamp) "
+                    "VALUES (:video_id, :table_id, :table_name, :old_status, :new_status, :timestamp)",
+                    row,
+                )
+                rows.append({"id": cursor.lastrowid, **row})
+        return rows
+
+    def recent_events(self, limit: int = 50, video_id: str | None = None) -> list[dict]:
+        """Newest events first, optionally for one video only."""
+        query = "SELECT * FROM events"
+        params: tuple = ()
+        if video_id is not None:
+            query += " WHERE video_id = ?"
+            params = (video_id,)
+        query += " ORDER BY id DESC LIMIT ?"
+        with self._lock:
+            return [dict(row) for row in self._conn.execute(query, (*params, limit))]
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()

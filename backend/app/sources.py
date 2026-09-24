@@ -64,7 +64,7 @@ def redact(source: str) -> str:
     return re.sub(r"(://[^:/@]+):[^@/]*@", r"\1:***@", source)
 
 
-def _is_reachable(url: str, timeout: float) -> bool:
+def is_reachable(url: str, timeout: float) -> bool:
     """Quick TCP check of a stream URL's host and port.
 
     On Windows, FFmpeg does not notice a refused connection and waits for its
@@ -154,7 +154,9 @@ class FrameSource:
 
     def is_alive(self) -> bool:
         """True while frames are arriving or the source is still trying to connect."""
-        return self._thread.is_alive() and not self._stop.is_set()
+        finished = self._status in (SourceStatus.ENDED, SourceStatus.STOPPED)
+        # The status is checked too: the thread may still be closing the file for a moment.
+        return self._thread.is_alive() and not self._stop.is_set() and not finished
 
     def release(self) -> None:
         """Stop the reader thread and close the source. Safe to call more than once."""
@@ -244,7 +246,7 @@ class FrameSource:
         if self._kind is _Kind.WEBCAM:
             cap = cv2.VideoCapture(int(self.source))
         elif self._kind is _Kind.STREAM:
-            if not _is_reachable(self.source, self._open_timeout_ms / 1000):
+            if not is_reachable(self.source, self._open_timeout_ms / 1000):
                 return None
             # Timeouts keep a dead or unreachable camera from blocking forever.
             cap = cv2.VideoCapture(

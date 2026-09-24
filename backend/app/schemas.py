@@ -1,10 +1,13 @@
-"""Pydantic models shared across the backend: the per-video table config."""
+"""Pydantic models shared across the backend: the per-video table config and API payloads."""
 
 from __future__ import annotations
 
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+
+TableStatusName = Literal["AVAILABLE", "PENDING_OCCUPIED", "OCCUPIED", "PENDING_AVAILABLE"]
+SourceLabel = Literal["LIVE", "RECONNECTING", "NO SOURCE"]
 
 ReferencePoint = Literal["bottom_center", "center"]
 # Video and table IDs end up in file names and URLs, so keep them simple.
@@ -68,3 +71,77 @@ class TableConfig(BaseModel):
             table.model_copy(update={"polygon": scale_polygon(table.polygon, from_size, to_size)})
             for table in self.tables
         ]
+
+
+# ---------------------------------------------------------------- API payloads
+
+
+class TablesUpdate(BaseModel):
+    """Body of PUT /api/config/tables.
+
+    Polygons are in pixels of a frame_width x frame_height frame. If the size
+    is left out, the size of the current live frame is used.
+    """
+
+    tables: list[TableDef]
+    frame_width: int | None = Field(default=None, gt=0)
+    frame_height: int | None = Field(default=None, gt=0)
+
+
+class TableStatusOut(BaseModel):
+    """Live status of one table."""
+
+    id: str
+    name: str
+    status: TableStatusName
+    occupied: bool = Field(description="OCCUPIED, or waiting to become AVAILABLE")
+    people_count: int
+    track_ids: list[int]
+    occupied_since: float | None = Field(description="Unix time the current guests arrived")
+    current_session_seconds: float
+    total_occupied_seconds: float
+    session_count: int
+
+
+class PipelineStatus(BaseModel):
+    """What the live pipeline sees right now (sent over the WebSocket)."""
+
+    video_id: str | None
+    has_tables: bool
+    source_status: SourceLabel
+    processing_fps: float
+    stream_fps: float
+    frame_width: int | None
+    frame_height: int | None
+    people_count: int
+    table_count: int
+    available_count: int
+    tables: list[TableStatusOut]
+    timestamp: float
+
+
+class EventOut(BaseModel):
+    """A stored table status change."""
+
+    id: int
+    video_id: str | None
+    table_id: str
+    table_name: str
+    old_status: TableStatusName
+    new_status: TableStatusName
+    timestamp: float
+
+
+class HealthOut(BaseModel):
+    """GET /api/health."""
+
+    status: Literal["ok"] = "ok"
+    pipeline_running: bool
+    model: Literal["loading", "ready", "failed"]
+    device: str | None
+    source: SourceLabel
+    processing_fps: float
+    stream_fps: float
+    video_id: str | None
+    mediamtx: Literal["running", "not running"]
+    ffmpeg: Literal["not managed"] = "not managed"

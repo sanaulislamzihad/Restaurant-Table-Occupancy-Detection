@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     confidence_threshold: float = Field(ge=0, le=1)
     detect_every_n_frames: int = Field(ge=1)
 
+    # Live pipeline
+    default_video_id: str
+    stream_jpeg_quality: int = Field(ge=1, le=100)
+
     # Occupancy defaults for new table configs
     enter_seconds: float = Field(ge=0)
     leave_seconds: float = Field(ge=0)

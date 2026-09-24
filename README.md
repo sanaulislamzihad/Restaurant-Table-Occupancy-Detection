@@ -139,7 +139,7 @@ The window shows the source status (LIVE, RECONNECTING, ...), its frame rate and
 
 ### Preview person detection and tracking
 
-`PersonDetector` (`backend/app/detector.py`) runs YOLO (`yolo11n.pt`, person class only) with ByteTrack, so every person gets an ID that stays the same across frames. The weights are downloaded into `backend/models/` on first use. It runs on an NVIDIA GPU automatically when CUDA is available, otherwise on the CPU.
+`PersonDetector` (`backend/app/detector.py`) runs Ultralytics YOLO (person class only) with ByteTrack, so every person gets an ID that stays the same across frames. The weights are downloaded into `backend/models/` on first use. It runs on an NVIDIA GPU automatically when CUDA is available, otherwise on the CPU.
 
 ```bash
 python backend/scripts/preview_detection.py                                  # the fake camera stream
@@ -147,7 +147,18 @@ python backend/scripts/preview_detection.py fake_camera/videos/my_video.mp4  # a
 python backend/scripts/preview_detection.py --conf 0.5 --every 2             # stricter, detect every 2nd frame
 ```
 
-Each person is drawn with a box, `#ID confidence` and a short trail; a seated person should keep the same ID. On an Intel i5-1235U CPU, `yolo11n` at `YOLO_IMG_SIZE=640` takes about 42 ms per frame (~24 fps). The model, image size, device and confidence threshold are set in `backend/.env`.
+Each person is drawn with a box, `#ID confidence` and a short trail; a seated person should keep the same ID. The model, image size, device and confidence threshold are set in `backend/.env`.
+
+Model choice, measured on a 640x360 overhead restaurant CCTV clip (about 25 people in view, detection on every 4th frame, Intel i5-1235U CPU, `YOLO_IMG_SIZE=640`):
+
+| Model | Confidence | Tracked people per frame | Time per detection |
+|---|---|---|---|
+| `yolo11n.pt` | 0.40 | 3.6 | ~45-65 ms |
+| `yolo26s.pt` | 0.25 | 13.4 | ~170 ms |
+| **`yolo26s.pt` (default)** | **0.15** | **14.8** | **~170 ms** |
+| `yolo26s.pt` at `YOLO_IMG_SIZE=960` | 0.15 | 15.5 | ~235 ms |
+
+The default detects about four times more people than `yolo11n`; the people it still misses are mostly hidden behind the counter or tables. Occupancy only needs a few detections per second, so ~6 per second on a CPU is enough. Set `YOLO_MODEL=yolo11n.pt` for a much faster but less accurate model.
 
 More run steps will be added as each part is finished. The goal is a single `run_all.bat` that starts the backend (which starts MediaMTX by itself) and the dashboard.
 

@@ -170,7 +170,7 @@ The default detects about four times more people than `yolo11n`; the people it s
    python backend/scripts/draw_tables.py restaurant --source fake_camera/videos/restaurant.mp4   # or from a file
    ```
 
-   A frame from the camera opens. Left-click the corners of a table (include the chairs, where people sit), right-click or press `Enter` to finish it, repeat for every table, then press `s` to save. `Backspace` undoes, `c` clears everything and `q` quits without saving. Running it again loads the saved tables for editing.
+   A frame from the camera opens with a white dot on every person found in it: the point that must be inside a table's outline for that table to count them. For seated people it is usually on the chair or floor next to the table, so **draw each outline around the table and its chairs**. Left-click the corners (4 is usually enough, in any order), right-click or press `Enter` to finish the table, repeat for every table (occupied or empty), then press `s` to save. `Backspace` undoes, `c` clears everything, `h` hides the help and `q` quits without saving. Outlines that are too thin, too small or cross themselves are refused with a message (corners clicked criss-cross are fixed automatically). Running it again loads the saved tables for editing.
 3. Watch the tables live:
 
    ```bash
@@ -234,6 +234,7 @@ python -m pytest backend
 │   │   ├── schemas.py         # table config models
 │   │   ├── config_store.py    # load / save configs/<video_id>.json
 │   │   ├── occupancy.py       # per-table AVAILABLE / OCCUPIED state machine
+│   │   ├── geometry.py        # checks that a table outline is usable
 │   │   └── annotator.py       # draws tables, people and the status overlay
 │   ├── scripts/               # preview_source, preview_detection, draw_tables, preview_occupancy
 │   ├── models/                # YOLO weights, downloaded on first use (gitignored)

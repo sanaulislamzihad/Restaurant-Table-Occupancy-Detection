@@ -1,5 +1,5 @@
 // Calls to the backend REST API. The address comes from VITE_API_BASE_URL.
-import type { StreamStatus, TableEvent, UploadLimits, Video } from "./types";
+import type { EditorFrame, StreamStatus, TableConfig, TableDef, TableEvent, UploadLimits, Video } from "./types";
 
 export const API_BASE_URL = __API_BASE_URL__.replace(/\/+$/, "");
 
@@ -53,6 +53,25 @@ export const api = {
   stopStream: () => request<StreamStatus>("/api/stream/stop", { method: "POST" }),
   streamStatus: () => request<StreamStatus>("/api/stream/status"),
   events: (limit = 50) => request<TableEvent[]>(`/api/events?limit=${limit}`),
+  /** The video's table config, or null if it has none yet. */
+  videoConfig: async (videoId: string): Promise<TableConfig | null> => {
+    try {
+      return await request<TableConfig>(`/api/videos/${encodeURIComponent(videoId)}/config`);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null;
+      throw error;
+    }
+  },
+  editorFrame: (videoId: string, options: { at?: number; live?: boolean } = {}) => {
+    const query = new URLSearchParams({ at: String(options.at ?? 1), live: String(options.live ?? true) });
+    return request<EditorFrame>(`/api/videos/${encodeURIComponent(videoId)}/editor-frame?${query}`);
+  },
+  saveTables: (videoId: string, tables: TableDef[], frameWidth: number, frameHeight: number) =>
+    request<TableConfig>(`/api/videos/${encodeURIComponent(videoId)}/tables`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tables, frame_width: frameWidth, frame_height: frameHeight }),
+    }),
 };
 
 /**

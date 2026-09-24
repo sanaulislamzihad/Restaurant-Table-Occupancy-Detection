@@ -4,7 +4,7 @@ Detects whether each table in a restaurant is **AVAILABLE** or **OCCUPIED** from
 
 There is no live camera yet, so uploaded CCTV footage is played as a looping **fake RTSP camera** (MediaMTX + ffmpeg). The detection pipeline reads that RTSP stream exactly like a real camera, so moving to a real CCTV camera later is a config change, not a code change.
 
-> **Status:** work in progress. Video upload, the fake RTSP camera (MediaMTX + ffmpeg managed by the backend), person detection with tracking, per-table occupancy, the REST/WebSocket API and the dashboard's Videos and Live Monitor pages work. The in-browser table editor and the analytics page are being built.
+> **Status:** work in progress. Video upload, the fake RTSP camera (MediaMTX + ffmpeg managed by the backend), person detection with tracking, per-table occupancy, the REST/WebSocket API and the dashboard's Videos and Live Monitor pages work, and tables are drawn in the browser. The analytics page is being built.
 
 ## How it works
 
@@ -31,11 +31,11 @@ Browser upload → backend saves video → ffmpeg loops it in real time
 | Part | Tool |
 |---|---|
 | Fake camera | MediaMTX (RTSP server) + ffmpeg, managed by the backend |
-| Detection + tracking | Ultralytics YOLO11n (person class) + ByteTrack |
+| Detection + tracking | Ultralytics YOLO (`yolo26s` by default, person class) + ByteTrack |
 | Zones and drawing | supervision + OpenCV |
 | Backend | FastAPI + Uvicorn, SQLite |
 | Live video / live status | MJPEG stream / WebSocket |
-| Frontend | React + Vite + Tailwind CSS |
+| Frontend | React + Vite + Tailwind CSS, react-konva for the table editor |
 
 ## Requirements
 
@@ -141,7 +141,13 @@ Then open <http://localhost:5173>.
 
 - **Videos:** drag and drop restaurant videos (type and size are checked before uploading; a progress bar shows the upload). Each uploaded video shows its thumbnail, duration, resolution, size and whether its tables are set up, with **Start Stream**, **Setup Tables** and **Delete**. The video that is streaming is marked. After Start Stream the dashboard opens the Live Monitor, or Table Setup if the video has no tables yet.
 - **Live Monitor:** the annotated live video, one card per table (big AVAILABLE / OCCUPIED badge, people count and an "occupied for mm:ss" timer), "N / M tables available", the connection state (LIVE / RECONNECTING / OFFLINE), the detection speed and a log of tables becoming occupied or available. It reconnects by itself when the backend restarts.
-- **Table Setup** and **Analytics:** coming next; until then tables are drawn with `backend/scripts/draw_tables.py` (see below).
+- **Table Setup:** pick a video and draw its tables on a frame of it (the live frame while that video is streaming, otherwise a frame from the file; **Another frame** shows a different moment). People are marked with pink dots: the point that must be inside a table's outline for that table to count them, so draw each outline around the table **and its chairs**.
+  - **Draw table**, click the corners, then click the first corner or press `Enter`. `Backspace` removes the last corner, `Esc` cancels.
+  - Click a table to select it, then drag it or its corners. Double-click an edge to add a corner, right-click a corner to remove it, `Delete` removes the table. Rename or delete tables in the list on the right.
+  - **Suggest tables** adds outlines around the tables the detector recognises in the frame (grown over their chairs and seated people, without overlapping). Check them: adjust the corners, delete wrong ones and draw the missed ones.
+  - **Copy from video** takes the tables of another video, scaled to this one; useful for a new recording of the same camera view.
+  - Outlines that are too thin, too small or cross themselves are marked red and must be fixed before saving; overlapping outlines get a warning. **Save** stores them in `backend/configs/<id>.json`; if the video is streaming, the Live Monitor uses them right away.
+- **Analytics:** coming next.
 
 ### Upload a video and stream it with the API
 
@@ -150,7 +156,7 @@ The same actions are available in the interactive docs at <http://127.0.0.1:8000
 1. **Upload:** `POST /api/videos` → *Try it out* → choose a file (mp4, avi, mov or mkv, up to `MAX_UPLOAD_MB`) → *Execute*. The answer contains the video's `id`, its duration, size and frame rate. Videos copied into `fake_camera/videos/` by hand are added when the backend starts, with their file name as ID (`restaurant.mp4` → `restaurant`), so an existing `backend/configs/restaurant.json` applies to them.
 2. **Stream:** `POST /api/stream/start` with `{"video_id": "<id>"}`, using an `id` from `GET /api/videos` (an unknown id answers 404 with the list of valid ids). ffmpeg loops the video in real time to `rtsp://localhost:8554/cam1`, and the pipeline switches to that video's tables. Starting another video switches over and the pipeline reconnects by itself; `POST /api/stream/stop` stops it. While no video is streaming the pipeline is idle and the live view shows NO SOURCE.
 3. **Watch:** <http://127.0.0.1:8000/api/stream> for the annotated video, or VLC → *Open Network Stream* → `rtsp://localhost:8554/cam1` for the raw camera.
-4. **Tables:** if the video has none yet (`has_tables` is false), draw them with `python backend/scripts/draw_tables.py <id>` (see below).
+4. **Tables:** if the video has none yet (`has_tables` is false), draw them on the dashboard's Table Setup page, or with `python backend/scripts/draw_tables.py <id>` (see below).
 
 `python -m app --video <id>` (or `DEFAULT_VIDEO_ID` in `backend/.env`) starts streaming that video right away. For a table config that is not an uploaded video, for example a real camera, it just watches the config's `source`.
 
@@ -162,6 +168,9 @@ The same actions are available in the interactive docs at <http://127.0.0.1:8000
 | POST | `/api/videos` | Upload a video (multipart field `file`) |
 | GET | `/api/videos` | Uploaded videos with metadata, table count and streaming flag |
 | GET | `/api/videos/{id}/thumbnail` | First frame as a JPEG |
+| GET | `/api/videos/{id}/editor-frame?at=1` | A frame to draw on (live if the video is streaming, else from the file at `at` seconds) with people's points and suggested table outlines |
+| GET | `/api/videos/{id}/config` | Table config of any video |
+| PUT | `/api/videos/{id}/tables` | Save table outlines of any video; if it is streaming, the live view uses them at once |
 | DELETE | `/api/videos/{id}` | Delete a video, its thumbnail and table config (stops its stream first) |
 | POST | `/api/stream/start` | Body `{"video_id": ...}`: stream that video as the fake CCTV camera |
 | POST | `/api/stream/stop` | Stop the fake camera |
@@ -171,7 +180,7 @@ The same actions are available in the interactive docs at <http://127.0.0.1:8000
 | GET | `/api/tables` | Current status of every table |
 | GET | `/api/events?limit=50` | Recent table status changes, newest first (stored in SQLite) |
 | GET | `/api/config` | Table config of the active video |
-| PUT | `/api/config/tables` | Save new table outlines; the live view uses them at once |
+| PUT | `/api/config/tables` | Save new table outlines of the active video; the live view uses them at once |
 | WS | `/ws/status` | Pushes `{"type": "status", "data": ...}` on every change and every second, and `{"type": "event", "data": ...}` for each table status change |
 
 How it runs (`backend/app/pipeline.py`): a frame thread reads every frame, draws the latest results on it and keeps the newest JPEG, so the video stays smooth (~20 fps). A detection thread takes the newest frame and runs YOLO, tracking and the occupancy state machine as fast as the CPU allows (~6 fps with `yolo26s` on an i5-1235U), stores status changes in `backend/data/app.db` and pushes updates to WebSocket clients. Saving new table outlines keeps the state of tables whose ID stays the same, so an occupied table does not reset. `backend/app/stream_manager.py` runs MediaMTX and ffmpeg; if ffmpeg stops on its own, `/api/stream/status` reports `error` and the video shows RECONNECTING until the stream is started again.
@@ -314,7 +323,8 @@ cd frontend && npm run build      # type check + production build
 │   │   ├── schemas.py         # table config models
 │   │   ├── config_store.py    # load / save configs/<video_id>.json
 │   │   ├── occupancy.py       # per-table AVAILABLE / OCCUPIED state machine
-│   │   ├── geometry.py        # checks that a table outline is usable
+│   │   ├── geometry.py        # checks that a table outline is usable, suggested outlines
+│   │   ├── scene_hints.py     # finds people, chairs and tables in a frame for the table editor
 │   │   └── annotator.py       # draws tables, people and the status overlay
 │   ├── scripts/               # preview_source, preview_detection, draw_tables, preview_occupancy
 │   ├── models/                # YOLO weights, downloaded on first use (gitignored)

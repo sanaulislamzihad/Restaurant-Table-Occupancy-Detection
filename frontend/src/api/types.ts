@@ -81,3 +81,41 @@ export interface UploadLimits {
 
 /** Messages pushed on /ws/status. */
 export type LiveMessage = { type: "status"; data: PipelineStatus } | { type: "event"; data: TableEvent };
+
+export type Point = [number, number];
+
+export interface TableDef {
+  id: string;
+  name: string;
+  /** Corners in pixels of the config's frame_width x frame_height frame. */
+  polygon: Point[];
+}
+
+export interface TableConfig {
+  video_id: string;
+  source: string;
+  frame_width: number;
+  frame_height: number;
+  tables: TableDef[];
+  occupancy: {
+    confidence_threshold: number;
+    enter_seconds: number;
+    leave_seconds: number;
+    reference_point: "bottom_center" | "center";
+    presence_hold_seconds: number;
+  };
+}
+
+/** A frame to draw tables on; all points are in pixels of this frame. */
+export interface EditorFrame {
+  video_id: string;
+  /** data:image/jpeg;base64 URL */
+  image: string;
+  frame_width: number;
+  frame_height: number;
+  live: boolean;
+  at_seconds: number | null;
+  people: Point[];
+  suggested_tables: Point[][];
+  hints_error: string | null;
+}

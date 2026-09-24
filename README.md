@@ -4,7 +4,7 @@ Detects whether each table in a restaurant is **AVAILABLE** or **OCCUPIED** from
 
 There is no live camera yet, so uploaded CCTV footage is played as a looping **fake RTSP camera** (MediaMTX + ffmpeg). The detection pipeline reads that RTSP stream exactly like a real camera, so moving to a real CCTV camera later is a config change, not a code change.
 
-> **Status:** work in progress. The backend works end to end: video upload, the fake RTSP camera (MediaMTX + ffmpeg managed by the backend), person detection with tracking, per-table occupancy and an annotated live stream with a REST/WebSocket API. The React dashboard is being built.
+> **Status:** work in progress. Video upload, the fake RTSP camera (MediaMTX + ffmpeg managed by the backend), person detection with tracking, per-table occupancy, the REST/WebSocket API and the dashboard's Videos and Live Monitor pages work. The in-browser table editor and the analytics page are being built.
 
 ## How it works
 
@@ -42,7 +42,7 @@ Browser upload → backend saves video → ffmpeg loops it in real time
 | Tool | Version | Check |
 |---|---|---|
 | Python | 3.10 or newer (tested with 3.14.2) | `python --version` |
-| Node.js | 18 or newer | `node --version` |
+| Node.js | 20.19+ or 22.12+ (needed by Vite 8) | `node --version` |
 | git | any recent version | `git --version` |
 | ffmpeg + ffprobe | any recent build with libx264 | `ffmpeg -version` |
 | MediaMTX | downloaded by a script (setup step 4) | |
@@ -104,7 +104,16 @@ copy backend\.env.example backend\.env      # Windows
 cp backend/.env.example backend/.env        # Linux / macOS
 ```
 
-All paths, ports, URLs and tuning values live in `backend/.env` or in the per-video table configs in `backend/configs/`. Nothing is hardcoded.
+All paths, ports, URLs and tuning values live in `backend/.env` or in the per-video table configs in `backend/configs/`. Nothing is hardcoded. Without a `backend/.env` the values of `backend/.env.example` are used.
+
+### 6. Dashboard
+
+```bash
+cd frontend
+npm install
+```
+
+The dashboard reads `frontend/.env` (copy `frontend/.env.example`; without it the example values are used): `VITE_API_BASE_URL` is the backend address and `FRONTEND_PORT` the dashboard's port, which must be in `CORS_ORIGINS` in `backend/.env`.
 
 ## Running
 
@@ -119,9 +128,24 @@ python -m app
 
 The backend starts MediaMTX by itself (unless an RTSP server already listens on the port of `FAKE_CAMERA_RTSP_URL`; set `MANAGE_MEDIAMTX=false` to never start it), loads the detection model and serves the API on `API_HOST`:`API_PORT` (default <http://127.0.0.1:8000>, interactive docs at <http://127.0.0.1:8000/docs>). `Ctrl+C` stops everything within a second. ffmpeg and MediaMTX are tied to the backend process, so they never keep running after it, even if it crashes or is killed.
 
-### Upload a video and stream it as a fake camera
+### Open the dashboard
 
-Until the dashboard is ready, use the interactive docs at <http://127.0.0.1:8000/docs>:
+In a second terminal:
+
+```bash
+cd frontend
+npm run dev
+```
+
+Then open <http://localhost:5173>.
+
+- **Videos:** drag and drop restaurant videos (type and size are checked before uploading; a progress bar shows the upload). Each uploaded video shows its thumbnail, duration, resolution, size and whether its tables are set up, with **Start Stream**, **Setup Tables** and **Delete**. The video that is streaming is marked. After Start Stream the dashboard opens the Live Monitor, or Table Setup if the video has no tables yet.
+- **Live Monitor:** the annotated live video, one card per table (big AVAILABLE / OCCUPIED badge, people count and an "occupied for mm:ss" timer), "N / M tables available", the connection state (LIVE / RECONNECTING / OFFLINE), the detection speed and a log of tables becoming occupied or available. It reconnects by itself when the backend restarts.
+- **Table Setup** and **Analytics:** coming next; until then tables are drawn with `backend/scripts/draw_tables.py` (see below).
+
+### Upload a video and stream it with the API
+
+The same actions are available in the interactive docs at <http://127.0.0.1:8000/docs>:
 
 1. **Upload:** `POST /api/videos` → *Try it out* → choose a file (mp4, avi, mov or mkv, up to `MAX_UPLOAD_MB`) → *Execute*. The answer contains the video's `id`, its duration, size and frame rate. Videos copied into `fake_camera/videos/` by hand are added when the backend starts, with their file name as ID (`restaurant.mp4` → `restaurant`), so an existing `backend/configs/restaurant.json` applies to them.
 2. **Stream:** `POST /api/stream/start` with `{"video_id": "<id>"}`, using an `id` from `GET /api/videos` (an unknown id answers 404 with the list of valid ids). ffmpeg loops the video in real time to `rtsp://localhost:8554/cam1`, and the pipeline switches to that video's tables. Starting another video switches over and the pipeline reconnects by itself; `POST /api/stream/stop` stops it. While no video is streaming the pipeline is idle and the live view shows NO SOURCE.
@@ -257,7 +281,9 @@ More run steps will be added as each part is finished. The goal is a single `run
 ## Tests
 
 ```bash
-python -m pytest backend
+python -m pytest backend          # backend
+cd frontend && npm test           # dashboard helpers
+cd frontend && npm run build      # type check + production build
 ```
 
 ## Project structure
@@ -297,6 +323,11 @@ python -m pytest backend
 │   ├── tests/                 # pytest tests
 │   ├── requirements.txt       # pinned Python dependencies
 │   └── .env.example           # configuration template
-├── frontend/                  # React dashboard (not started yet)
+├── frontend/                  # React + Vite + Tailwind dashboard
+│   ├── src/api/               # REST client and response types
+│   ├── src/hooks/             # live WebSocket status, clock
+│   ├── src/components/        # table card, video card, upload, event log, ...
+│   ├── src/pages/             # Videos, Live Monitor, Table Setup, Analytics
+│   └── .env.example           # backend address and dashboard port
 └── README.md
 ```

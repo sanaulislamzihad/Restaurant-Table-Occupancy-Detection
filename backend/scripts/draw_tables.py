@@ -8,8 +8,8 @@ Usage (from the project folder, with the virtual environment active):
 The config is saved as <CONFIGS_DIR>/<video_id>.json. If it already exists, its
 tables are loaded for editing and its occupancy settings are kept.
 
-The people found in the frame are marked with white dots: the point that has
-to be inside a table outline for that table to count the person. Draw each
+The people found in the frame are boxed and marked with a pink dot: the point
+that has to be inside a table outline for that table to count the person. Draw each
 outline around the table and its chairs so the dots of the seated people fall
 inside it.
 
@@ -37,7 +37,7 @@ from loguru import logger
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # makes the "app" package importable
 
-from app.annotator import BLACK, RED, WHITE, YELLOW, put_label  # noqa: E402
+from app.annotator import BLACK, RED, WHITE, YELLOW, draw_reference_point, put_label  # noqa: E402
 from app.config_store import ConfigStore, default_occupancy  # noqa: E402
 from app.detector import PersonDetector  # noqa: E402
 from app.geometry import outline_problem, tidy_polygon  # noqa: E402
@@ -51,7 +51,7 @@ MAX_DISPLAY_SIZE = (1280, 720)  # small CCTV frames are enlarged to this, big on
 TABLE_COLOR = (255, 200, 0)
 HELP_LINES = [
     "Click the corners around a table and its chairs (4 is usually enough), then right-click or Enter.",
-    "White dots = people's reference points. They must be inside a table's outline to count.",
+    "Pink dots = people's reference points. They must be inside a table's outline to count.",
     "Backspace: undo | c: clear all | s: save | q: quit | h: hide this help",
 ]
 KEY_ENTER, KEY_BACKSPACE, KEY_ESC = 13, 8, 27
@@ -67,27 +67,29 @@ def grab_frame(source: str, settings: Settings) -> np.ndarray:
     return frame
 
 
-def people_anchor_points(frame: np.ndarray, settings: Settings, occupancy: OccupancySettings) -> np.ndarray:
-    """Reference points of the people in the frame (empty if detection is unavailable)."""
+def detect_people(frame: np.ndarray, settings: Settings, occupancy: OccupancySettings) -> tuple[np.ndarray, np.ndarray]:
+    """Boxes and reference points of the people in the frame (empty if detection is unavailable)."""
     try:
         detector = PersonDetector.from_settings(settings, confidence=occupancy.confidence_threshold)
         detections = detector.detect(frame)
     except Exception as error:  # drawing still works without the hints
         logger.warning("Could not detect people for the hints: {}", error)
-        return np.empty((0, 2))
-    return detections.get_anchors_coordinates(anchor_position(occupancy.reference_point))
+        return np.empty((0, 4)), np.empty((0, 2))
+    logger.info("Found {} people in the frame", len(detections))
+    return detections.xyxy, detections.get_anchors_coordinates(anchor_position(occupancy.reference_point))
 
 
 class TableEditor:
     """Mouse and keyboard polygon editing on one frame (all coordinates in frame pixels)."""
 
-    def __init__(self, frame: np.ndarray, tables: list[TableDef], people: np.ndarray) -> None:
+    def __init__(self, frame: np.ndarray, tables: list[TableDef],
+                 people: tuple[np.ndarray, np.ndarray] = (np.empty((0, 4)), np.empty((0, 2)))) -> None:
         self.frame = frame
         height, width = frame.shape[:2]
         self.frame_size = (width, height)
         self.scale = min(MAX_DISPLAY_SIZE[0] / width, MAX_DISPLAY_SIZE[1] / height)
         self.tables = list(tables)
-        self.people = people
+        self.people_boxes, self.people_points = people
         self.points: list[tuple[float, float]] = []
         self.message = "Draw the first table."
         self.message_is_error = False
@@ -146,9 +148,10 @@ class TableEditor:
             for point in current:
                 cv2.circle(image, tuple(int(v) for v in point), 5, YELLOW, cv2.FILLED)
 
-        for x, y in self.people * self.scale:
-            cv2.circle(image, (int(x), int(y)), 6, BLACK, cv2.FILLED)
-            cv2.circle(image, (int(x), int(y)), 4, WHITE, cv2.FILLED)
+        for x1, y1, x2, y2 in np.rint(self.people_boxes * self.scale).astype(int):
+            cv2.rectangle(image, (x1, y1), (x2, y2), WHITE, 1, cv2.LINE_AA)
+        for x, y in np.rint(self.people_points * self.scale).astype(int):
+            draw_reference_point(image, (int(x), int(y)), radius=7)
 
         lines = HELP_LINES if self.show_help else []
         for i, line in enumerate(lines):
@@ -176,7 +179,7 @@ def main() -> int:
         source = str(Path(source).resolve())  # keep working from any folder
     frame = grab_frame(source, settings)
     height, width = frame.shape[:2]
-    people = people_anchor_points(frame, settings, occupancy)
+    people = detect_people(frame, settings, occupancy)
 
     editor = TableEditor(frame, existing.tables_for_frame(width, height) if existing else [], people)
     if existing:

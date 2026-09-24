@@ -2,7 +2,7 @@
 
 * Table polygons: green = AVAILABLE, red = OCCUPIED, yellow = pending states,
   with the table name and status above each polygon.
-* People: box, tracker ID and the anchor point used for the table test.
+* People: box, tracker ID and (pink dot) the anchor point used for the table test.
 * Corner overlay: time, processing FPS and source status.
 """
 
@@ -24,6 +24,7 @@ RED = (40, 40, 220)
 YELLOW = (0, 200, 255)
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
+PINK = (255, 0, 255)  # people's reference points: stands out on light floors and tables
 
 STATUS_COLORS = {
     TableStatus.AVAILABLE: GREEN,
@@ -46,6 +47,12 @@ def source_label(status: SourceStatus) -> str:
     if status in (SourceStatus.CONNECTING, SourceStatus.RECONNECTING):
         return "RECONNECTING"
     return "NO SOURCE"
+
+
+def draw_reference_point(image: np.ndarray, point: tuple[int, int], radius: int = 5) -> None:
+    """A person's reference point: a pink dot with a dark ring, visible on any background."""
+    cv2.circle(image, point, radius + 2, BLACK, cv2.FILLED, cv2.LINE_AA)
+    cv2.circle(image, point, radius, PINK, cv2.FILLED, cv2.LINE_AA)
 
 
 def _text_scale(frame: np.ndarray) -> float:
@@ -116,8 +123,7 @@ class FrameAnnotator:
         track_ids = detections.tracker_id if detections.tracker_id is not None else [-1] * len(detections)
         for (x1, y1, x2, y2), (ax, ay), track_id in zip(detections.xyxy.astype(int), anchors.astype(int), track_ids):
             cv2.rectangle(image, (x1, y1), (x2, y2), WHITE, 1, cv2.LINE_AA)
-            cv2.circle(image, (ax, ay), 4, BLACK, cv2.FILLED)
-            cv2.circle(image, (ax, ay), 3, WHITE, cv2.FILLED)
+            draw_reference_point(image, (ax, ay), radius=4)
             if track_id >= 0:
                 put_label(image, f"#{track_id}", (x1, y1), (80, 80, 80), scale)
 

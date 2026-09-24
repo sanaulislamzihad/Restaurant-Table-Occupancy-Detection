@@ -132,6 +132,9 @@ class EventOut(BaseModel):
     timestamp: float
 
 
+StreamState = Literal["running", "stopped", "error"]
+
+
 class HealthOut(BaseModel):
     """GET /api/health."""
 
@@ -144,4 +147,45 @@ class HealthOut(BaseModel):
     stream_fps: float
     video_id: str | None
     mediamtx: Literal["running", "not running"]
-    ffmpeg: Literal["not managed"] = "not managed"
+    mediamtx_managed: bool = Field(description="started by this backend (vs. already running)")
+    ffmpeg: StreamState
+
+
+class VideoOut(BaseModel):
+    """An uploaded video."""
+
+    id: str
+    name: str = Field(description="original file name")
+    filename: str
+    size_bytes: int
+    duration_seconds: float | None
+    width: int | None
+    height: int | None
+    fps: float | None
+    codec: str | None
+    uploaded_at: float
+    has_tables: bool
+    table_count: int
+    is_streaming: bool
+    thumbnail_url: str
+
+
+class StreamStartIn(BaseModel):
+    """Body of POST /api/stream/start."""
+
+    video_id: str = Field(pattern=ID_PATTERN)
+
+
+class StreamStatusOut(BaseModel):
+    """State of the fake CCTV camera (ffmpeg + MediaMTX)."""
+
+    state: StreamState
+    video_id: str | None
+    video_name: str | None = None
+    has_tables: bool = False
+    started_at: float | None
+    uptime_seconds: float | None
+    rtsp_url: str
+    error: str | None
+    mediamtx: Literal["running", "not running"]
+    mediamtx_managed: bool

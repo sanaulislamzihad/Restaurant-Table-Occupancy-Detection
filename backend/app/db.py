@@ -1,4 +1,4 @@
-"""SQLite storage for table status-change events.
+"""SQLite storage: table status-change events and uploaded video metadata.
 
 One connection shared by the pipeline thread and the API, guarded by a lock.
 """
@@ -23,7 +23,24 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_by_time ON events (timestamp);
 CREATE INDEX IF NOT EXISTS events_by_video ON events (video_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS videos (
+    id                TEXT PRIMARY KEY,
+    original_name     TEXT NOT NULL,
+    filename          TEXT NOT NULL UNIQUE,
+    size_bytes        INTEGER NOT NULL,
+    duration_seconds  REAL,
+    width             INTEGER,
+    height            INTEGER,
+    fps               REAL,
+    codec             TEXT,
+    uploaded_at       REAL NOT NULL
+);
 """
+_VIDEO_COLUMNS = (
+    "id", "original_name", "filename", "size_bytes", "duration_seconds",
+    "width", "height", "fps", "codec", "uploaded_at",
+)
 
 
 class Database:
@@ -70,6 +87,30 @@ class Database:
         query += " ORDER BY id DESC LIMIT ?"
         with self._lock:
             return [dict(row) for row in self._conn.execute(query, (*params, limit))]
+
+    # ------------------------------------------------------------------ videos
+
+    def add_video(self, video: dict) -> dict:
+        """Store a video's metadata (keys: see the videos table)."""
+        row = {column: video.get(column) for column in _VIDEO_COLUMNS}
+        placeholders = ", ".join(f":{column}" for column in _VIDEO_COLUMNS)
+        with self._lock, self._conn:
+            self._conn.execute(f"INSERT INTO videos ({', '.join(_VIDEO_COLUMNS)}) VALUES ({placeholders})", row)
+        return row
+
+    def list_videos(self) -> list[dict]:
+        """All videos, newest upload first."""
+        with self._lock:
+            return [dict(row) for row in self._conn.execute("SELECT * FROM videos ORDER BY uploaded_at DESC")]
+
+    def get_video(self, video_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM videos WHERE id = ?", (video_id,)).fetchone()
+        return dict(row) if row else None
+
+    def delete_video(self, video_id: str) -> bool:
+        with self._lock, self._conn:
+            return self._conn.execute("DELETE FROM videos WHERE id = ?", (video_id,)).rowcount > 0
 
     def close(self) -> None:
         with self._lock:

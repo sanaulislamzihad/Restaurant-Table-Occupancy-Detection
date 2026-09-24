@@ -1,4 +1,4 @@
-"""End-to-end tests of the API and live pipeline, with a fake detector and a generated video."""
+"""End-to-end tests of the live API with a fake detector, reading a video file configured as a camera."""
 
 from __future__ import annotations
 
@@ -11,35 +11,16 @@ from typing import Any
 import cv2
 import numpy as np
 import pytest
-import supervision as sv
 from fastapi.testclient import TestClient
 
 from app.config_store import ConfigStore
 from app.main import create_app, mjpeg_parts
 from app.schemas import OccupancySettings, TableConfig, TableDef
-from app.settings import BACKEND_DIR, Settings
+from conftest import FakeDetector, FakePopen, make_settings, write_video
 
 WIDTH, HEIGHT = 320, 180
 TABLE_1 = TableDef(id="T1", name="Table 1", polygon=[(20, 20), (150, 20), (150, 170), (20, 170)])
 TABLE_2 = TableDef(id="T2", name="Table 2", polygon=[(180, 20), (300, 20), (300, 170), (180, 170)])
-
-
-class FakeDetector:
-    """Always sees one person whose feet are inside Table 1."""
-
-    device = "cpu"
-    confidence = 0.1
-
-    def detect(self, frame: np.ndarray) -> sv.Detections:
-        return sv.Detections(
-            xyxy=np.array([[60.0, 60.0, 100.0, 150.0]]),
-            confidence=np.array([0.9]),
-            class_id=np.array([0]),
-            tracker_id=np.array([1]),
-        )
-
-    def reset_tracking(self) -> None:
-        pass
 
 
 def wait_until(condition: Callable[[], Any], timeout: float = 15.0) -> Any:
@@ -54,22 +35,9 @@ def wait_until(condition: Callable[[], Any], timeout: float = 15.0) -> Any:
 
 @pytest.fixture
 def client(tmp_path: Path) -> Iterator[TestClient]:
-    video = tmp_path / "demo.avi"
-    writer = cv2.VideoWriter(str(video), cv2.VideoWriter_fourcc(*"MJPG"), 20, (WIDTH, HEIGHT))
-    for i in range(20):
-        writer.write(np.full((HEIGHT, WIDTH, 3), 40 + i * 5, np.uint8))
-    writer.release()
-
-    settings = Settings(_env_file=BACKEND_DIR / ".env.example").model_copy(  # type: ignore[call-arg]
-        update={
-            "configs_dir": tmp_path / "configs",
-            "data_dir": tmp_path / "data",
-            "default_video_id": "demo",
-            "fake_camera_rtsp_url": "rtsp://127.0.0.1:9/none",
-            "loop_video_files": True,
-            "detect_every_n_frames": 1,
-        }
-    )
+    """The "demo" config reads a video file directly, the way a real camera config would."""
+    video = write_video(tmp_path / "camera.avi", size=(WIDTH, HEIGHT))
+    settings = make_settings(tmp_path, default_video_id="demo")
     ConfigStore(settings.configs_dir).save(TableConfig(
         video_id="demo",
         source=str(video),
@@ -78,7 +46,7 @@ def client(tmp_path: Path) -> Iterator[TestClient]:
         tables=[TABLE_1],
         occupancy=OccupancySettings(confidence_threshold=0.1, enter_seconds=0, leave_seconds=10),
     ))
-    app = create_app(settings, detector_factory=lambda _settings: FakeDetector())
+    app = create_app(settings, detector_factory=lambda _settings: FakeDetector(), popen=FakePopen())
     with TestClient(app) as test_client:
         wait_until(lambda: test_client.get("/api/health").json()["source"] == "LIVE")
         yield test_client
@@ -92,7 +60,8 @@ def test_health(client: TestClient) -> None:
     health = client.get("/api/health").json()
     assert health["pipeline_running"] and health["model"] == "ready"
     assert health["video_id"] == "demo" and health["device"] == "cpu"
-    assert health["mediamtx"] == "not running"
+    assert health["mediamtx"] == "not running" and health["mediamtx_managed"] is False
+    assert health["ffmpeg"] == "stopped"  # "demo" is a camera config, not an uploaded video
 
 
 def test_tables_become_occupied_and_events_are_stored(client: TestClient) -> None:

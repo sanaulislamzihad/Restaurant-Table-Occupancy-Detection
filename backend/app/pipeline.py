@@ -37,7 +37,6 @@ from app.geometry import outline_problem
 from app.occupancy import OccupancyTracker, TableState
 from app.schemas import (
     EventOut,
-    HealthOut,
     PipelineStatus,
     ReferencePoint,
     TableConfig,
@@ -46,7 +45,7 @@ from app.schemas import (
     TableStatusOut,
 )
 from app.settings import Settings
-from app.sources import FrameSource, SourceStatus, is_reachable, redact
+from app.sources import FrameSource, SourceStatus, redact
 
 STATUS_HEARTBEAT_SECONDS = 1.0  # status is pushed at least this often
 FPS_LOG_SECONDS = 10.0
@@ -147,9 +146,9 @@ class Pipeline:
 
     # ------------------------------------------------------------------ lifecycle
 
-    def start(self) -> None:
-        """Start watching DEFAULT_VIDEO_ID (if set) and start both threads."""
-        self.activate(self.settings.default_video_id or None)
+    def start(self, video_id: str | None = None) -> None:
+        """Start watching video_id (None: the fake camera with no tables) and start both threads."""
+        self.activate(video_id)
         for target, name in ((self._frame_loop, "pipeline-frames"), (self._detection_loop, "pipeline-detection")):
             thread = threading.Thread(target=target, name=name, daemon=True)
             thread.start()
@@ -176,13 +175,38 @@ class Pipeline:
     def video_id(self) -> str | None:
         return self._video_id
 
+    @property
+    def model_state(self) -> str:
+        """Detection model state: loading, ready or failed."""
+        return self._model_state
+
+    @property
+    def device(self) -> str | None:
+        with self._lock:
+            return self._detector.device if self._detector else None
+
+    @property
+    def source_label(self) -> str:
+        """LIVE, RECONNECTING or NO SOURCE."""
+        with self._lock:
+            return source_label(self._source.status if self._source else SourceStatus.STOPPED)
+
+    @property
+    def processing_fps(self) -> float:
+        return round(self._processing.rate, 1)
+
+    @property
+    def stream_fps(self) -> float:
+        return round(self._streaming.rate, 1)
+
     # ------------------------------------------------------------------ what to watch
 
     def activate(self, video_id: str | None) -> None:
         """Watch a video: load its table config and switch to its source.
 
         Without a config (or with video_id None) the fake camera URL is watched
-        with no tables. The source is only reconnected if it changes.
+        with no tables. When the video changes, the source is reopened so no
+        stale frame of the previous video is processed with the new tables.
         """
         config = None
         if video_id:
@@ -194,7 +218,7 @@ class Pipeline:
 
         with self._lock:
             old_source = None
-            if self._source is None or self._source.source != source_url:
+            if self._source is None or self._source.source != source_url or video_id != self._video_id:
                 old_source = self._source
                 self._source = FrameSource.from_settings(source_url, self.settings)
                 self._frame = None
@@ -300,22 +324,6 @@ class Pipeline:
             available_count=sum(not table.occupied for table in tables),
             tables=tables,
             timestamp=now,
-        )
-
-    def health(self) -> HealthOut:
-        with self._lock:
-            source_status = self._source.status if self._source else SourceStatus.STOPPED
-            device = self._detector.device if self._detector else None
-        mediamtx_up = is_reachable(self.settings.fake_camera_rtsp_url, timeout=0.3)
-        return HealthOut(
-            pipeline_running=self.running,
-            model=self._model_state,
-            device=device,
-            source=source_label(source_status),
-            processing_fps=round(self._processing.rate, 1),
-            stream_fps=round(self._streaming.rate, 1),
-            video_id=self._video_id,
-            mediamtx="running" if mediamtx_up else "not running",
         )
 
     # ------------------------------------------------------------------ frame thread

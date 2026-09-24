@@ -1,30 +1,50 @@
 # Restaurant Table Occupancy Detection
 
-Detects whether each table in a restaurant is **AVAILABLE** or **OCCUPIED** from a CCTV feed and shows the result on a live web dashboard.
+Detects whether each table in a restaurant is **AVAILABLE** or **OCCUPIED** from a CCTV feed and shows it on a live web dashboard, with occupancy analytics.
 
-There is no live camera yet, so uploaded CCTV footage is played as a looping **fake RTSP camera** (MediaMTX + ffmpeg). The detection pipeline reads that RTSP stream exactly like a real camera, so moving to a real CCTV camera later is a config change, not a code change.
+There is no live camera yet, so uploaded CCTV footage is played as a looping **fake RTSP camera** (MediaMTX + ffmpeg, started and managed by the backend). The detection pipeline reads that RTSP stream exactly like a real camera, so moving to a real CCTV camera is a config change, not a code change.
 
-> **Status:** work in progress. Video upload, the fake RTSP camera (MediaMTX + ffmpeg managed by the backend), person detection with tracking, per-table occupancy, the REST/WebSocket API and all four dashboard pages (Videos, Live Monitor, Table Setup, Analytics) work.
+## Screenshots
+
+| Live Monitor | Table Setup |
+|---|---|
+| ![Live Monitor: annotated video and one card per table](docs/screenshots/live-monitor.jpg) | ![Table Setup: drawing table outlines on a frame](docs/screenshots/table-setup.jpg) |
+| **Videos** | **Analytics** |
+| ![Videos: upload and start a stream](docs/screenshots/videos.jpg) | ![Analytics: occupancy over time and per table](docs/screenshots/analytics.jpg) |
+
+## Features
+
+- **Upload restaurant videos** in the browser (mp4, avi, mov, mkv) and stream any of them as a live RTSP camera with one click.
+- **Person detection and tracking** with Ultralytics YOLO and ByteTrack; every person keeps an ID across frames.
+- **Per-table occupancy** with enter and leave delays, so a passer-by or someone who stands up for a moment does not flip a table.
+- **Live Monitor:** annotated video, a card per table with an "occupied for" timer, tables available, connection state and an event log.
+- **Table editor in the browser:** draw outlines, drag corners, rename, get outlines suggested from the detected tables, or copy them from another video. Changes apply to the live view at once.
+- **Analytics:** occupied time, sessions and occupancy over time per table, counted only while the video is actually watched.
+- **Robust:** ffmpeg and MediaMTX never outlive the backend, a stopped stream shows up on the dashboard with a restart button, and the pipeline reconnects by itself.
+- **Configuration, not code:** all paths, ports, URLs and tuning values are in `backend/.env` and per-video JSON configs. Runs on Windows and Linux, on the CPU or on an NVIDIA GPU when CUDA is available.
 
 ## How it works
 
-```text
-Browser upload → backend saves video → ffmpeg loops it in real time
-                                              ↓
-                                   MediaMTX → rtsp://localhost:8554/cam1
-                                              ↓
-                                   Frame reader (keeps only the latest frame)
-                                              ↓
-                                   YOLO person detection + ByteTrack
-                                              ↓
-                                   Table zones (JSON config per video)
-                                              ↓
-                                   Occupancy state machine
-                                    ↙                     ↘
-                      Annotated video (MJPEG)     Status + events (WebSocket / REST)
-                                    ↘                     ↙
-                                         React dashboard
+```mermaid
+flowchart LR
+    V[Uploaded video] --> F["ffmpeg<br/>loops it in real time"]
+    F --> M["MediaMTX<br/>RTSP server"]
+    M -->|rtsp://localhost:8554/cam1| R["Frame reader<br/>newest frame only"]
+    C[Real CCTV camera] -.->|change source in the config| R
+    R --> D["YOLO + ByteTrack<br/>people with track IDs"]
+    D --> O["Occupancy state machine<br/>one per table outline"]
+    O --> DB[("SQLite<br/>events and runs")]
+    O --> WS[WebSocket: status and events]
+    R --> MJ[MJPEG: annotated video]
+    DB --> AN[Analytics API]
+    WS --> UI[React dashboard]
+    MJ --> UI
+    AN --> UI
 ```
+
+- **Pipeline** (`backend/app/pipeline.py`): a frame thread reads every frame, draws the latest results on it and serves it as MJPEG, so the video stays smooth (20 fps). A detection thread takes the newest frame and runs YOLO, tracking and the occupancy state machine as fast as the CPU allows. The pipeline only gets frames; it does not know whether they come from a file, an RTSP stream or a webcam.
+- **Occupancy** (`backend/app/occupancy.py`): a person is at a table when the bottom centre of their box (or its centre) is inside the table's outline. A table becomes OCCUPIED after someone has been there for `enter_seconds` and AVAILABLE after it has been empty for `leave_seconds`, measured on the clock so it behaves the same at any frame rate. Detection gaps shorter than `presence_hold_seconds` (1 s) are ignored.
+- **Analytics** (`backend/app/analytics.py`): every status change is stored in SQLite, and so is every *run* (a stretch of time a video with tables was watched). Sessions are rebuilt from the events with the same rule as the Live Monitor's timer: from when the guests arrived until they left. Every run starts with all tables AVAILABLE, and time the video was not watched never counts as occupied.
 
 ## Tech stack
 
@@ -33,7 +53,7 @@ Browser upload → backend saves video → ffmpeg loops it in real time
 | Fake camera | MediaMTX (RTSP server) + ffmpeg, managed by the backend |
 | Detection + tracking | Ultralytics YOLO (`yolo26s` by default, person class) + ByteTrack |
 | Zones and drawing | supervision + OpenCV |
-| Backend | FastAPI + Uvicorn, SQLite |
+| Backend | FastAPI + Uvicorn, SQLite, loguru |
 | Live video / live status | MJPEG stream / WebSocket |
 | Frontend | React + Vite + Tailwind CSS, react-konva for the table editor, recharts for the charts |
 
@@ -95,178 +115,148 @@ python -m pip install -r backend/requirements.txt
 python fake_camera/download_mediamtx.py
 ```
 
-This downloads the latest MediaMTX release for your OS into `fake_camera/bin/`, verifies its SHA-256 checksum and runs `mediamtx --version`. Add `--tag v1.21.1` to get a specific release.
+This downloads the latest MediaMTX release for your OS into `fake_camera/bin/`, verifies its SHA-256 checksum and runs `mediamtx --version`. Add `--tag v1.21.1` to get a specific release. (`run_all` does this by itself when MediaMTX is missing.)
 
-### 5. Configuration
+### 5. Configuration (optional)
 
 ```bash
 copy backend\.env.example backend\.env      # Windows
 cp backend/.env.example backend/.env        # Linux / macOS
 ```
 
-All paths, ports, URLs and tuning values live in `backend/.env` or in the per-video table configs in `backend/configs/`. Nothing is hardcoded. Without a `backend/.env` the values of `backend/.env.example` are used.
+Without a `backend/.env` the values of `backend/.env.example` are used; each value is explained there. All paths, ports, URLs and tuning values live in `backend/.env` or in the per-video table configs in `backend/configs/`. The dashboard reads `frontend/.env` the same way (copy `frontend/.env.example`): `VITE_API_BASE_URL` is the backend address and `FRONTEND_PORT` the dashboard's port, which must be in `CORS_ORIGINS` in `backend/.env`.
 
-### 6. Dashboard
+### 6. Dashboard packages
 
 ```bash
 cd frontend
 npm install
 ```
 
-The dashboard reads `frontend/.env` (copy `frontend/.env.example`; without it the example values are used): `VITE_API_BASE_URL` is the backend address and `FRONTEND_PORT` the dashboard's port, which must be in `CORS_ORIGINS` in `backend/.env`.
+(`run_all` also installs them when some are missing or out of date.)
 
 ## Running
 
-### Start the backend
+### One command
 
-From the `backend` folder, with the virtual environment active:
+```text
+run_all.bat          Windows: double-click it, or run it from the project folder
+./run_all.sh         Linux / macOS
+```
+
+It starts the backend (which starts MediaMTX by itself) and the dashboard, and opens <http://localhost:5173> in the browser. On Windows each runs in its own window: close both windows (or press `Ctrl+C` in them) to stop. On Linux/macOS `Ctrl+C` stops both.
+
+### By hand
+
+Backend, from the `backend` folder with the virtual environment active:
 
 ```bash
 cd backend
 python -m app
 ```
 
-The backend starts MediaMTX by itself (unless an RTSP server already listens on the port of `FAKE_CAMERA_RTSP_URL`; set `MANAGE_MEDIAMTX=false` to never start it), loads the detection model and serves the API on `API_HOST`:`API_PORT` (default <http://127.0.0.1:8000>, interactive docs at <http://127.0.0.1:8000/docs>). `Ctrl+C` stops everything within a second. ffmpeg and MediaMTX are tied to the backend process, so they never keep running after it, even if it crashes or is killed.
-
-### Open the dashboard
-
-In a second terminal:
+Dashboard, in a second terminal:
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-Then open <http://localhost:5173>.
+The backend serves the API on `API_HOST`:`API_PORT` (default <http://127.0.0.1:8000>, interactive docs at <http://127.0.0.1:8000/docs>). It starts MediaMTX unless an RTSP server already listens on the port of `FAKE_CAMERA_RTSP_URL` (set `MANAGE_MEDIAMTX=false` to never start it). `Ctrl+C` stops everything within a second, and ffmpeg and MediaMTX are tied to the backend process, so they never keep running after it, even if it crashes or is killed. `python -m app --video <id>` (or `DEFAULT_VIDEO_ID` in `backend/.env`) starts watching that video right away.
 
-- **Videos:** drag and drop restaurant videos (type and size are checked before uploading; a progress bar shows the upload). Each uploaded video shows its thumbnail, duration, resolution, size and whether its tables are set up, with **Start Stream**, **Setup Tables** and **Delete**. The video that is streaming is marked. After Start Stream the dashboard opens the Live Monitor, or Table Setup if the video has no tables yet.
-- **Live Monitor:** the annotated live video, one card per table (big AVAILABLE / OCCUPIED badge, people count and an "occupied for mm:ss" timer), "N / M tables available", the connection state (LIVE / RECONNECTING / OFFLINE), the detection speed and a log of tables becoming occupied or available. It reconnects by itself when the backend restarts.
-- **Table Setup:** pick a video and draw its tables on a frame of it (the live frame while that video is streaming, otherwise a frame from the file; **Another frame** shows a different moment). People are marked with pink dots: the point that must be inside a table's outline for that table to count them, so draw each outline around the table **and its chairs**.
-  - **Draw table**, click the corners, then click the first corner or press `Enter`. `Backspace` removes the last corner, `Esc` cancels.
-  - Click a table to select it, then drag it or its corners. Double-click an edge to add a corner, right-click a corner to remove it, `Delete` removes the table. Rename or delete tables in the list on the right.
-  - **Suggest tables** adds outlines around the tables the detector recognises in the frame (grown over their chairs and seated people, without overlapping). Check them: adjust the corners, delete wrong ones and draw the missed ones.
-  - **Copy from video** takes the tables of another video, scaled to this one; useful for a new recording of the same camera view.
-  - Outlines that are too thin, too small or cross themselves are marked red and must be fixed before saving; overlapping outlines get a warning. **Save** stores them in `backend/configs/<id>.json`; if the video is streaming, the Live Monitor uses them right away.
-- **Analytics:** pick a video and a time range (15 min to all time). Shows the average occupancy, watched time, number of sessions (groups of guests) and average session length; a chart of the share of tables occupied over time (hover for details, or *Show as table*); and per table its occupancy, occupied time, sessions, average and longest session. While the video is live it updates every 10 seconds.
+## How to use
 
-  Occupancy is only counted while a video streams with its tables. Each stretch of streaming is stored as a *run*; every run starts with all tables AVAILABLE, and a table still occupied when the stream stops counts until the stop. So stopped time, or time the backend was off, never counts as occupied. A session lasts from when the guests arrived until they left, the same rule as the Live Monitor's timer.
+1. **Videos:** drop a restaurant video on the upload area (type and size are checked first; a progress bar shows the upload). Each video shows its thumbnail, duration, resolution and whether its tables are set up. Press **Start Stream**: the video loops as `rtsp://localhost:8554/cam1`, and the dashboard opens the Live Monitor, or Table Setup if the video has no tables yet. Starting another video switches the camera and the tables; **Stop** stops it.
+2. **Table Setup:** draw the tables once per camera view, on a frame of the video (the live frame while it streams; **Another frame** shows a different moment). Pink dots mark people: the point that must be inside a table's outline for that table to count them, so draw each outline around the table **and its chairs**.
+   - **Draw table**, click the corners, then click the first corner or press `Enter`. `Backspace` removes the last corner, `Esc` cancels.
+   - Click a table to select it, then drag it or its corners. Double-click an edge to add a corner, right-click a corner to remove it, `Delete` removes the table. Rename or delete tables in the list on the right.
+   - **Suggest tables** adds outlines around the tables the detector recognises in the frame (grown over their chairs and seated people, without overlapping). Check them: adjust the corners, delete wrong ones and draw the missed ones.
+   - **Copy from video** takes the tables of another video, scaled to this one, for a new recording of the same camera view.
+   - Outlines that are too thin, too small or cross themselves are marked red and must be fixed before saving; overlapping outlines get a warning. **Save** stores them in `backend/configs/<id>.json`; a streaming video uses them right away.
+3. **Live Monitor:** the annotated video (green = AVAILABLE, red = OCCUPIED, yellow = waiting to change), a card per table with its status, people count and "occupied for mm:ss", "N / M tables available", the connection state (LIVE / RECONNECTING / OFFLINE), the detection speed and a log of tables becoming occupied or available. It reconnects by itself when the backend restarts.
+4. **Analytics:** pick a video and a time range (15 min to all time): average occupancy, watched time, number of sessions (groups of guests) and average session length; the share of tables occupied over time (hover for details, or *Show as table*); and per table its occupancy, occupied time, sessions, average and longest session. While the video is live it updates every 10 seconds.
 
-### Upload a video and stream it with the API
+## Using a real CCTV camera
 
-The same actions are available in the interactive docs at <http://127.0.0.1:8000/docs>:
+Every video or camera has a table config in `backend/configs/<id>.json`, and its `source` is where the frames come from. No code changes are needed:
 
-1. **Upload:** `POST /api/videos` → *Try it out* → choose a file (mp4, avi, mov or mkv, up to `MAX_UPLOAD_MB`) → *Execute*. The answer contains the video's `id`, its duration, size and frame rate. Videos copied into `fake_camera/videos/` by hand are added when the backend starts, with their file name as ID (`restaurant.mp4` → `restaurant`), so an existing `backend/configs/restaurant.json` applies to them.
-2. **Stream:** `POST /api/stream/start` with `{"video_id": "<id>"}`, using an `id` from `GET /api/videos` (an unknown id answers 404 with the list of valid ids). ffmpeg loops the video in real time to `rtsp://localhost:8554/cam1`, and the pipeline switches to that video's tables. Starting another video switches over and the pipeline reconnects by itself; `POST /api/stream/stop` stops it. While no video is streaming the pipeline is idle and the live view shows NO SOURCE.
-3. **Watch:** <http://127.0.0.1:8000/api/stream> for the annotated video, or VLC → *Open Network Stream* → `rtsp://localhost:8554/cam1` for the raw camera.
-4. **Tables:** if the video has none yet (`has_tables` is false), draw them on the dashboard's Table Setup page, or with `python backend/scripts/draw_tables.py <id>` (see below).
+1. Create a config for the camera, for example `backend/configs/entrance.json`, by copying an existing one and changing `video_id` and `source`:
 
-`python -m app --video <id>` (or `DEFAULT_VIDEO_ID` in `backend/.env`) starts streaming that video right away. For a table config that is not an uploaded video, for example a real camera, it just watches the config's `source`.
+   ```json
+   {
+     "video_id": "entrance",
+     "source": "rtsp://user:password@192.168.1.20:554/stream1",
+     "frame_width": 1920,
+     "frame_height": 1080,
+     "tables": [],
+     "occupancy": { "confidence_threshold": 0.15, "enter_seconds": 5, "leave_seconds": 10, "reference_point": "bottom_center" }
+   }
+   ```
 
-### API
+   Any address OpenCV/FFmpeg can open works: `rtsp://`, `http://`, a video file path, or a webcam number such as `0`. Passwords in the URL are hidden in the logs.
+2. Start the backend watching it: `python -m app --video entrance` (or `DEFAULT_VIDEO_ID=entrance` in `backend/.env`).
+3. Draw the tables on a live frame of the camera: `python backend/scripts/draw_tables.py entrance` (see *Developer tools*), then restart the backend, or save them with `PUT /api/config/tables` while it runs.
+
+The Live Monitor and Analytics work the same as with the fake camera. If the camera drops out, the pipeline reconnects by itself (`SOURCE_RECONNECT_SECONDS`), and a camera that stays down longer than `SOURCE_OUTAGE_SECONDS` stops occupancy from being counted until it is back. To use the uploaded videos with a different RTSP server, change `FAKE_CAMERA_RTSP_URL` instead.
+
+## Performance
+
+Measured on an Intel i5-1235U laptop CPU (no GPU), 640x360 overhead restaurant CCTV footage, `YOLO_IMG_SIZE=640`, confidence 0.15:
+
+| Model | Detection + tracking alone | In the running backend (video at 20 fps) | People found per frame |
+|---|---|---|---|
+| `yolo11n.pt` | 19.7 fps (51 ms) | ~18 detections/s | 8.0 |
+| `yolo26n.pt` | 20.1 fps (50 ms) | | 7.5 |
+| `yolo11s.pt` | 9.3 fps (108 ms) | | 15.0 |
+| **`yolo26s.pt` (default)** | **9.0 fps (111 ms)** | **~8.5 detections/s** | **15.5** |
+
+The default finds about twice as many people as `yolo11n`, which matters in overhead footage where seated people are small and partly hidden; the ones it still misses are mostly behind the counter or tables. Occupancy only needs a few detections per second, so ~8 per second on a CPU is plenty, and the video itself always streams at its full frame rate. Set `YOLO_MODEL=yolo11n.pt` in `backend/.env` for a faster but less accurate model. With a fast model or a GPU, `DETECT_EVERY_N_FRAMES=2` (or more) runs detection on fewer frames to save power. The live detection speed is shown on the Live Monitor and logged every 10 seconds.
+
+To measure on your machine (weights missing from `backend/models/` are downloaded first):
+
+```bash
+python backend/scripts/benchmark.py fake_camera/videos/restaurant.mp4 --models yolo11n.pt yolo26s.pt
+```
+
+## Robustness
+
+- **ffmpeg stops** (crash or killed): `/api/stream/status` reports `error` with ffmpeg's last messages, the Live Monitor shows RECONNECTING, a red banner with **Restart stream**, and the table cards greyed out as "last known status". Restarting (there, or **Start Stream** on the Videos page) brings it back.
+- **The video stops arriving** for longer than `SOURCE_OUTAGE_SECONDS` (default 30 s): occupancy is no longer counted, and it starts over (all tables AVAILABLE) when frames come back, so Analytics never count time nobody watched.
+- **Switching videos** loads the other video's table config; the pipeline reconnects by itself and never mixes frames of the old video with the new tables.
+- **No orphan processes:** on Windows ffmpeg and MediaMTX run in a Job Object, on Linux they get a parent-death signal, so they end with the backend even after a crash.
+- **Logs:** everything, including the web server's messages, goes to the console and to `backend/logs/backend.log`. A new file is started every `LOG_ROTATION_MB` (10 MB) and the newest `LOG_RETENTION_FILES` (5) are kept.
+
+## API
+
+Interactive docs: <http://127.0.0.1:8000/docs>.
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/health` | Pipeline, model, source, MediaMTX and ffmpeg state, processing and stream FPS |
 | POST | `/api/videos` | Upload a video (multipart field `file`) |
 | GET | `/api/videos` | Uploaded videos with metadata, table count and streaming flag |
+| GET | `/api/videos/limits` | Largest upload and accepted file types |
 | GET | `/api/videos/{id}/thumbnail` | First frame as a JPEG |
 | GET | `/api/videos/{id}/editor-frame?at=1` | A frame to draw on (live if the video is streaming, else from the file at `at` seconds) with people's points and suggested table outlines |
 | GET | `/api/videos/{id}/config` | Table config of any video |
 | PUT | `/api/videos/{id}/tables` | Save table outlines of any video; if it is streaming, the live view uses them at once |
 | DELETE | `/api/videos/{id}` | Delete a video, its thumbnail, table config and analytics history (stops its stream first) |
-| POST | `/api/stream/start` | Body `{"video_id": ...}`: stream that video as the fake CCTV camera |
+| POST | `/api/stream/start` | Body `{"video_id": ...}`: stream that video as the fake CCTV camera (404 lists the valid ids) |
 | POST | `/api/stream/stop` | Stop the fake camera |
 | GET | `/api/stream/status` | Current video; running, stopped or error (with ffmpeg's last messages) |
 | GET | `/api/stream` | Annotated live video (MJPEG, usable as `<img src>`) |
-| GET | `/api/snapshot` | One raw JPEG frame, e.g. for the table editor |
+| GET | `/api/snapshot` | One raw JPEG frame of the live video |
 | GET | `/api/tables` | Current status of every table |
-| GET | `/api/events?limit=50` | Recent table status changes, newest first (stored in SQLite) |
+| GET | `/api/events?limit=50` | Recent table status changes, newest first |
 | GET | `/api/config` | Table config of the active video |
 | PUT | `/api/config/tables` | Save new table outlines of the active video; the live view uses them at once |
 | GET | `/api/analytics?video_id=&since=&until=` | Per-table occupied time and sessions, and occupancy over time (defaults: the live video, all its recorded time) |
 | GET | `/api/analytics/videos` | Videos with recorded streaming time |
 | WS | `/ws/status` | Pushes `{"type": "status", "data": ...}` on every change and every second, and `{"type": "event", "data": ...}` for each table status change |
 
-How it runs (`backend/app/pipeline.py`): a frame thread reads every frame, draws the latest results on it and keeps the newest JPEG, so the video stays smooth (~20 fps). A detection thread takes the newest frame and runs YOLO, tracking and the occupancy state machine as fast as the CPU allows (~6 fps with `yolo26s` on an i5-1235U), stores status changes and the streaming runs in `backend/data/app.db` and pushes updates to WebSocket clients. Saving new table outlines keeps the state of tables whose ID stays the same, so an occupied table does not reset. `backend/app/stream_manager.py` runs MediaMTX and ffmpeg; if ffmpeg stops on its own, `/api/stream/status` reports `error` and the video shows RECONNECTING until the stream is started again.
+Videos copied into `fake_camera/videos/` by hand are added when the backend starts, with their file name as ID (`restaurant.mp4` → `restaurant`), so an existing `backend/configs/restaurant.json` applies to them.
 
-### Developer tools
-
-#### Fake CCTV camera without the backend
-
-1. Copy a restaurant video (`.mp4`, `.avi`, `.mov` or `.mkv`) into `fake_camera/videos/`.
-2. Start the camera from the project folder:
-
-   ```powershell
-   fake_camera\start_camera.bat my_video.mp4      # Windows
-   ./fake_camera/start_camera.sh my_video.mp4     # Linux / macOS
-   ```
-
-   Without a file name it lists the videos in `fake_camera/videos/`; a path to a video anywhere else works too. The script starts MediaMTX (unless one is already running) and streams the video to `rtsp://localhost:8554/cam1` in real time, looping forever. It prints the exact ffmpeg command it runs. `Ctrl+C` stops everything.
-3. Open the stream in a player:
-   - **VLC:** Media → Open Network Stream → `rtsp://localhost:8554/cam1`
-   - **ffplay** (installed with ffmpeg): `ffplay -rtsp_transport tcp rtsp://localhost:8554/cam1`
-
-The stream URL and port come from `FAKE_CAMERA_RTSP_URL` in `backend/.env`. Only RTSP over TCP is enabled in `fake_camera/mediamtx.yml`. If Windows asks for firewall access for MediaMTX, **Cancel** keeps the camera reachable from this computer only. Do not run this and a backend stream at the same time: both would publish to the same URL.
-
-#### Preview a video source
-
-`FrameSource` (`backend/app/sources.py`) reads frames from a video file, an RTSP/HTTP stream or a webcam with the same code. It keeps only the newest frame, reconnects to streams and webcams by itself, and plays files at their own frame rate on a loop. To see it working (with the virtual environment active):
-
-```bash
-python backend/scripts/preview_source.py                                  # FAKE_CAMERA_RTSP_URL (start the fake camera first)
-python backend/scripts/preview_source.py fake_camera/videos/my_video.mp4  # a video file
-python backend/scripts/preview_source.py 0                                # webcam 0
-```
-
-The window shows the source status (LIVE, RECONNECTING, ...), its frame rate and the frame size. While previewing the RTSP URL, stop the fake camera: the status switches to RECONNECTING, and the picture comes back by itself when the camera starts again. Press `q` or `Esc` to quit.
-
-#### Preview person detection and tracking
-
-`PersonDetector` (`backend/app/detector.py`) runs Ultralytics YOLO (person class only) with ByteTrack, so every person gets an ID that stays the same across frames. The weights are downloaded into `backend/models/` on first use. It runs on an NVIDIA GPU automatically when CUDA is available, otherwise on the CPU.
-
-```bash
-python backend/scripts/preview_detection.py                                  # the fake camera stream
-python backend/scripts/preview_detection.py fake_camera/videos/my_video.mp4  # a video file
-python backend/scripts/preview_detection.py --conf 0.5 --every 2             # stricter, detect every 2nd frame
-```
-
-Each person is drawn with a box, `#ID confidence` and a short trail; a seated person should keep the same ID. The model, image size, device and confidence threshold are set in `backend/.env`.
-
-Model choice, measured on a 640x360 overhead restaurant CCTV clip (about 25 people in view, detection on every 4th frame, Intel i5-1235U CPU, `YOLO_IMG_SIZE=640`):
-
-| Model | Confidence | Tracked people per frame | Time per detection |
-|---|---|---|---|
-| `yolo11n.pt` | 0.40 | 3.6 | ~45-65 ms |
-| `yolo26s.pt` | 0.25 | 13.4 | ~170 ms |
-| **`yolo26s.pt` (default)** | **0.15** | **14.8** | **~170 ms** |
-| `yolo26s.pt` at `YOLO_IMG_SIZE=960` | 0.15 | 15.5 | ~235 ms |
-
-The default detects about four times more people than `yolo11n`; the people it still misses are mostly hidden behind the counter or tables. Occupancy only needs a few detections per second, so ~6 per second on a CPU is enough. Set `YOLO_MODEL=yolo11n.pt` for a much faster but less accurate model.
-
-#### Draw the tables and watch occupancy
-
-1. Stream the video (backend or manual fake camera), or have a real camera URL ready.
-2. Draw the tables once:
-
-   ```bash
-   python backend/scripts/draw_tables.py restaurant
-   python backend/scripts/draw_tables.py restaurant --source fake_camera/videos/restaurant.mp4   # or from a file
-   ```
-
-   A frame from the camera opens with every person in it boxed and marked with a pink dot: the point that must be inside a table's outline for that table to count them. For seated people it is usually on the chair or floor next to the table, so **draw each outline around the table and its chairs**. Left-click the corners (4 is usually enough, in any order), right-click or press `Enter` to finish the table, repeat for every table (occupied or empty), then press `s` to save. `Backspace` undoes, `c` clears everything, `h` hides the help and `q` quits without saving. Outlines that are too thin, too small or cross themselves are refused with a message (corners clicked criss-cross are fixed automatically). Running it again loads the saved tables for editing.
-3. Watch the tables live:
-
-   ```bash
-   python backend/scripts/preview_occupancy.py restaurant
-   ```
-
-   Green = AVAILABLE, red = OCCUPIED, yellow = waiting to change (PENDING). Every status change is printed, and the bottom line shows how many tables are free.
-
-How a table decides (`backend/app/occupancy.py`): a person counts as "at" a table when the bottom centre of their box (or its centre, see `reference_point`) is inside the table's outline. A table becomes OCCUPIED only after someone has been there continuously for `enter_seconds` (a passer-by does not count), and AVAILABLE only after it has been empty continuously for `leave_seconds`. Timing uses the clock, not the frame count, so it behaves the same at any frame rate. Detection gaps shorter than `presence_hold_seconds` (1 s) are ignored, because detections of a seated person flicker for a frame or two.
-
-### Table config
-
-Each video or camera has its table layout in `backend/configs/<video_id>.json`:
+## Table config
 
 ```json
 {
@@ -287,9 +277,50 @@ Each video or camera has its table layout in `backend/configs/<video_id>.json`:
 }
 ```
 
-Polygons are in pixels of a `frame_width` x `frame_height` frame and are scaled automatically when the live frames have another size. `source` is where frames come from: point it at a real CCTV camera (`rtsp://user:pass@192.168.1.20:554/stream`) and nothing else changes. New configs take their `occupancy` values from `ENTER_SECONDS`, `LEAVE_SECONDS`, `REFERENCE_POINT` and `CONFIDENCE_THRESHOLD` in `backend/.env`.
+Polygons are in pixels of a `frame_width` x `frame_height` frame and are scaled automatically when the live frames have another size. New configs take their `occupancy` values from `ENTER_SECONDS`, `LEAVE_SECONDS`, `REFERENCE_POINT` and `CONFIDENCE_THRESHOLD` in `backend/.env`; edit the file to change them for one video (saving tables in the editor keeps them).
 
-More run steps will be added as each part is finished. The goal is a single `run_all.bat` that starts the backend (which starts MediaMTX by itself) and the dashboard.
+## Developer tools
+
+All commands run from the project folder with the virtual environment active.
+
+#### Fake CCTV camera without the backend
+
+```powershell
+fake_camera\start_camera.bat my_video.mp4      # Windows
+./fake_camera/start_camera.sh my_video.mp4     # Linux / macOS
+```
+
+Streams a video from `fake_camera/videos/` (or any path) to `rtsp://localhost:8554/cam1` in real time, looping forever, and starts MediaMTX if needed. Without a file name it lists the videos. Open the stream in VLC (*Media → Open Network Stream*) or with `ffplay -rtsp_transport tcp rtsp://localhost:8554/cam1`. Do not run it while the backend streams a video: both would publish to the same URL. If Windows asks for firewall access for MediaMTX, **Cancel** keeps the camera reachable from this computer only.
+
+#### Preview a video source
+
+```bash
+python backend/scripts/preview_source.py                                  # FAKE_CAMERA_RTSP_URL
+python backend/scripts/preview_source.py fake_camera/videos/my_video.mp4  # a video file
+python backend/scripts/preview_source.py 0                                # webcam 0
+```
+
+Shows what `FrameSource` (`backend/app/sources.py`) reads, with its status (LIVE, RECONNECTING, ...), frame rate and size. Stop the camera while previewing: the status switches to RECONNECTING and the picture comes back by itself. `q` or `Esc` quits.
+
+#### Preview person detection and tracking
+
+```bash
+python backend/scripts/preview_detection.py                                  # the fake camera stream
+python backend/scripts/preview_detection.py fake_camera/videos/my_video.mp4  # a video file
+python backend/scripts/preview_detection.py --conf 0.5 --every 2             # stricter, detect every 2nd frame
+```
+
+Each person is drawn with a box, `#ID confidence` and a short trail; a seated person should keep the same ID.
+
+#### Draw the tables and watch occupancy without the dashboard
+
+```bash
+python backend/scripts/draw_tables.py restaurant                                               # on the config's source
+python backend/scripts/draw_tables.py restaurant --source fake_camera/videos/restaurant.mp4   # on a file
+python backend/scripts/preview_occupancy.py restaurant                                         # watch it live
+```
+
+`draw_tables.py` opens a frame with every person marked by a pink dot. Left-click the corners of a table, right-click or `Enter` to finish it, repeat for every table, then `s` saves. `Backspace` undoes, `c` clears everything, `h` hides the help and `q` quits without saving. Running it again loads the saved tables for editing. `preview_occupancy.py` shows the tables in green / red / yellow and prints every status change.
 
 ## Tests
 
@@ -303,12 +334,12 @@ cd frontend && npm run build      # type check + production build
 
 ```text
 .
+├── run_all.bat / run_all.sh   # start the backend and the dashboard
+├── docs/screenshots/          # images used in this README
 ├── fake_camera/
 │   ├── download_mediamtx.py   # fetches the MediaMTX binary into bin/
 │   ├── mediamtx.yml           # MediaMTX config (RTSP over TCP only)
-│   ├── start_camera.py        # loops a video as a live RTSP stream
-│   ├── start_camera.bat       # Windows launcher
-│   ├── start_camera.sh        # Linux / macOS launcher
+│   ├── start_camera.py        # loops a video as a live RTSP stream (.bat / .sh launchers)
 │   ├── bin/                   # MediaMTX executable (gitignored)
 │   └── videos/                # footage (gitignored)
 ├── backend/
@@ -323,26 +354,28 @@ cd frontend && npm run build      # type check + production build
 │   │   ├── analytics.py       # sessions and occupancy statistics from the events
 │   │   ├── broadcaster.py     # pushes status/events to WebSocket clients
 │   │   ├── settings.py        # typed settings from backend/.env
+│   │   ├── logging_setup.py   # console + rotating log file
 │   │   ├── sources.py         # FrameSource: file / stream / webcam reader
 │   │   ├── detector.py        # PersonDetector: YOLO + ByteTrack
-│   │   ├── schemas.py         # table config models
+│   │   ├── schemas.py         # table config and API models
 │   │   ├── config_store.py    # load / save configs/<video_id>.json
 │   │   ├── occupancy.py       # per-table AVAILABLE / OCCUPIED state machine
 │   │   ├── geometry.py        # checks that a table outline is usable, suggested outlines
 │   │   ├── scene_hints.py     # finds people, chairs and tables in a frame for the table editor
 │   │   └── annotator.py       # draws tables, people and the status overlay
-│   ├── scripts/               # preview_source, preview_detection, draw_tables, preview_occupancy
+│   ├── scripts/               # preview_source, preview_detection, draw_tables, preview_occupancy, benchmark
 │   ├── models/                # YOLO weights, downloaded on first use (gitignored)
-│   ├── data/                  # SQLite database (gitignored)
+│   ├── data/                  # SQLite database and thumbnails (gitignored)
+│   ├── logs/                  # backend.log (gitignored)
 │   ├── configs/               # <video_id>.json table configs
 │   ├── tests/                 # pytest tests
 │   ├── requirements.txt       # pinned Python dependencies
 │   └── .env.example           # configuration template
-├── frontend/                  # React + Vite + Tailwind dashboard
-│   ├── src/api/               # REST client and response types
-│   ├── src/hooks/             # live WebSocket status, clock
-│   ├── src/components/        # table card, video card, upload, event log, ...
-│   ├── src/pages/             # Videos, Live Monitor, Table Setup, Analytics
-│   └── .env.example           # backend address and dashboard port
-└── README.md
+└── frontend/                  # React + Vite + Tailwind dashboard
+    ├── src/api/               # REST client and response types
+    ├── src/hooks/             # live WebSocket status, clock
+    ├── src/components/        # table editor canvas, charts, table card, video card, upload, event log, ...
+    ├── src/lib/               # formatting and polygon helpers
+    ├── src/pages/             # Videos, Live Monitor, Table Setup, Analytics
+    └── .env.example           # backend address and dashboard port
 ```

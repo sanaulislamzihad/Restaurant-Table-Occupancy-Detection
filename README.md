@@ -4,7 +4,7 @@ Detects whether each table in a restaurant is **AVAILABLE** or **OCCUPIED** from
 
 There is no live camera yet, so uploaded CCTV footage is played as a looping **fake RTSP camera** (MediaMTX + ffmpeg). The detection pipeline reads that RTSP stream exactly like a real camera, so moving to a real CCTV camera later is a config change, not a code change.
 
-> **Status:** work in progress. The fake RTSP camera works; the detection pipeline and dashboard are being built.
+> **Status:** work in progress. The fake RTSP camera and the frame reader work; detection, the API and the dashboard are being built.
 
 ## How it works
 
@@ -125,7 +125,25 @@ All paths, ports, URLs and tuning values live in `backend/.env` or in the per-vi
 
 The stream URL and port come from `FAKE_CAMERA_RTSP_URL` in `backend/.env`. Only RTSP over TCP is enabled in `fake_camera/mediamtx.yml`. If Windows asks for firewall access for MediaMTX, **Cancel** keeps the camera reachable from this computer only.
 
+### Preview a video source
+
+`FrameSource` (`backend/app/sources.py`) reads frames from a video file, an RTSP/HTTP stream or a webcam with the same code. It keeps only the newest frame, reconnects to streams and webcams by itself, and plays files at their own frame rate on a loop. To see it working (with the virtual environment active):
+
+```bash
+python backend/scripts/preview_source.py                                  # FAKE_CAMERA_RTSP_URL (start the fake camera first)
+python backend/scripts/preview_source.py fake_camera/videos/my_video.mp4  # a video file
+python backend/scripts/preview_source.py 0                                # webcam 0
+```
+
+The window shows the source status (LIVE, RECONNECTING, ...), its frame rate and the frame size. While previewing the RTSP URL, stop the fake camera: the status switches to RECONNECTING, and the picture comes back by itself when the camera starts again. Press `q` or `Esc` to quit.
+
 More run steps will be added as each part is finished. The goal is a single `run_all.bat` that starts the backend (which starts MediaMTX by itself) and the dashboard.
+
+## Tests
+
+```bash
+python -m pytest backend
+```
 
 ## Project structure
 
@@ -141,6 +159,9 @@ More run steps will be added as each part is finished. The goal is a single `run
 │   └── videos/                # footage (gitignored)
 ├── backend/
 │   ├── app/                   # FastAPI application
+│   │   ├── settings.py        # typed settings from backend/.env
+│   │   └── sources.py         # FrameSource: file / stream / webcam reader
+│   ├── scripts/               # developer tools (source preview)
 │   ├── configs/               # <video_id>.json table configs
 │   ├── tests/                 # pytest tests
 │   ├── requirements.txt       # pinned Python dependencies

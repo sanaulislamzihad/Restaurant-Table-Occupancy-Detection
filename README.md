@@ -4,7 +4,7 @@ Detects whether each table in a restaurant is **AVAILABLE** or **OCCUPIED** from
 
 There is no live camera yet, so uploaded CCTV footage is played as a looping **fake RTSP camera** (MediaMTX + ffmpeg). The detection pipeline reads that RTSP stream exactly like a real camera, so moving to a real CCTV camera later is a config change, not a code change.
 
-> **Status:** work in progress. The fake RTSP camera and the frame reader work; detection, the API and the dashboard are being built.
+> **Status:** work in progress. The fake RTSP camera, the frame reader and person detection with tracking work; table occupancy, the API and the dashboard are being built.
 
 ## How it works
 
@@ -137,6 +137,18 @@ python backend/scripts/preview_source.py 0                                # webc
 
 The window shows the source status (LIVE, RECONNECTING, ...), its frame rate and the frame size. While previewing the RTSP URL, stop the fake camera: the status switches to RECONNECTING, and the picture comes back by itself when the camera starts again. Press `q` or `Esc` to quit.
 
+### Preview person detection and tracking
+
+`PersonDetector` (`backend/app/detector.py`) runs YOLO (`yolo11n.pt`, person class only) with ByteTrack, so every person gets an ID that stays the same across frames. The weights are downloaded into `backend/models/` on first use. It runs on an NVIDIA GPU automatically when CUDA is available, otherwise on the CPU.
+
+```bash
+python backend/scripts/preview_detection.py                                  # the fake camera stream
+python backend/scripts/preview_detection.py fake_camera/videos/my_video.mp4  # a video file
+python backend/scripts/preview_detection.py --conf 0.5 --every 2             # stricter, detect every 2nd frame
+```
+
+Each person is drawn with a box, `#ID confidence` and a short trail; a seated person should keep the same ID. On an Intel i5-1235U CPU, `yolo11n` at `YOLO_IMG_SIZE=640` takes about 42 ms per frame (~24 fps). The model, image size, device and confidence threshold are set in `backend/.env`.
+
 More run steps will be added as each part is finished. The goal is a single `run_all.bat` that starts the backend (which starts MediaMTX by itself) and the dashboard.
 
 ## Tests
@@ -160,8 +172,10 @@ python -m pytest backend
 ├── backend/
 │   ├── app/                   # FastAPI application
 │   │   ├── settings.py        # typed settings from backend/.env
-│   │   └── sources.py         # FrameSource: file / stream / webcam reader
-│   ├── scripts/               # developer tools (source preview)
+│   │   ├── sources.py         # FrameSource: file / stream / webcam reader
+│   │   └── detector.py        # PersonDetector: YOLO + ByteTrack
+│   ├── scripts/               # developer tools (source / detection preview)
+│   ├── models/                # YOLO weights, downloaded on first use (gitignored)
 │   ├── configs/               # <video_id>.json table configs
 │   ├── tests/                 # pytest tests
 │   ├── requirements.txt       # pinned Python dependencies

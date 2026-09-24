@@ -31,11 +31,12 @@ from app.schemas import (
     TableConfig,
     TablesUpdate,
     TableStatusOut,
+    UploadLimitsOut,
     VideoOut,
 )
 from app.settings import Settings, get_settings
 from app.stream_manager import StreamManager
-from app.videos import VideoError, VideoLibrary
+from app.videos import ALLOWED_EXTENSIONS, VideoError, VideoLibrary
 
 # Set when the server is asked to stop (Ctrl+C), so endless MJPEG streams and
 # WebSocket loops end and the shutdown does not hang on open browser tabs.
@@ -208,6 +209,11 @@ def create_app(
     def list_videos(request: Request) -> list[VideoOut]:
         """Uploaded videos with their metadata, newest first."""
         return [video_out(request, video) for video in request.app.state.library.list()]
+
+    @app.get("/api/videos/limits", response_model=UploadLimitsOut, tags=["videos"])
+    def upload_limits() -> UploadLimitsOut:
+        """Largest upload and accepted file types."""
+        return UploadLimitsOut(max_upload_mb=settings.max_upload_mb, extensions=list(ALLOWED_EXTENSIONS))
 
     @app.get("/api/videos/{video_id}/thumbnail", tags=["videos"], response_class=FileResponse,
              responses={200: {"content": {"image/jpeg": {}}}, 404: {"description": "No such video"}})

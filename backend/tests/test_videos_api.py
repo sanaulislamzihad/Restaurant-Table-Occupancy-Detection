@@ -57,6 +57,18 @@ def test_upload_reads_metadata_and_makes_a_thumbnail(app: App) -> None:
     assert ids[0] == video["id"]  # newest first
 
 
+def test_dashboard_origin_is_allowed_by_cors(app: App) -> None:
+    allowed = app.client.get("/api/videos", headers={"Origin": "http://localhost:5173"})
+    assert allowed.headers.get("access-control-allow-origin") == "http://localhost:5173"
+    other = app.client.get("/api/videos", headers={"Origin": "http://evil.example"})
+    assert "access-control-allow-origin" not in other.headers
+
+
+def test_upload_limits(app: App) -> None:
+    limits = app.client.get("/api/videos/limits").json()
+    assert limits == {"max_upload_mb": 1, "extensions": [".mp4", ".avi", ".mov", ".mkv"]}
+
+
 def test_videos_already_in_the_folder_are_listed_by_file_name(app: App) -> None:
     videos = {v["id"]: v for v in app.client.get("/api/videos").json()}
     assert "lobby" in videos and videos["lobby"]["name"] == "lobby.avi"

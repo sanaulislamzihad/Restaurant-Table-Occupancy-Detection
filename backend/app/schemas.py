@@ -170,6 +170,13 @@ class VideoOut(BaseModel):
     thumbnail_url: str
 
 
+class UploadLimitsOut(BaseModel):
+    """What POST /api/videos accepts, so the browser can check files before uploading."""
+
+    max_upload_mb: int
+    extensions: list[str]
+
+
 class StreamStartIn(BaseModel):
     """Body of POST /api/stream/start."""
 

@@ -4,7 +4,7 @@ Detects whether each table in a restaurant is **AVAILABLE** or **OCCUPIED** from
 
 There is no live camera yet, so uploaded CCTV footage is played as a looping **fake RTSP camera** (MediaMTX + ffmpeg). The detection pipeline reads that RTSP stream exactly like a real camera, so moving to a real CCTV camera later is a config change, not a code change.
 
-> **Status:** work in progress. The fake RTSP camera, the frame reader and person detection with tracking work; table occupancy, the API and the dashboard are being built.
+> **Status:** work in progress. The fake RTSP camera, the frame reader, person detection with tracking and per-table occupancy work; the API and the dashboard are being built.
 
 ## How it works
 
@@ -160,6 +160,52 @@ Model choice, measured on a 640x360 overhead restaurant CCTV clip (about 25 peop
 
 The default detects about four times more people than `yolo11n`; the people it still misses are mostly hidden behind the counter or tables. Occupancy only needs a few detections per second, so ~6 per second on a CPU is enough. Set `YOLO_MODEL=yolo11n.pt` for a much faster but less accurate model.
 
+### Draw the tables and watch occupancy
+
+1. Start the fake camera (or have a real camera URL ready).
+2. Draw the tables once:
+
+   ```bash
+   python backend/scripts/draw_tables.py restaurant
+   python backend/scripts/draw_tables.py restaurant --source fake_camera/videos/restaurant.mp4   # or from a file
+   ```
+
+   A frame from the camera opens. Left-click the corners of a table (include the chairs, where people sit), right-click or press `Enter` to finish it, repeat for every table, then press `s` to save. `Backspace` undoes, `c` clears everything and `q` quits without saving. Running it again loads the saved tables for editing.
+3. Watch the tables live:
+
+   ```bash
+   python backend/scripts/preview_occupancy.py restaurant
+   ```
+
+   Green = AVAILABLE, red = OCCUPIED, yellow = waiting to change (PENDING). Every status change is printed, and the bottom line shows how many tables are free.
+
+How a table decides (`backend/app/occupancy.py`): a person counts as "at" a table when the bottom centre of their box (or its centre, see `reference_point`) is inside the table's outline. A table becomes OCCUPIED only after someone has been there continuously for `enter_seconds` (a passer-by does not count), and AVAILABLE only after it has been empty continuously for `leave_seconds`. Timing uses the clock, not the frame count, so it behaves the same at any frame rate. Detection gaps shorter than `presence_hold_seconds` (1 s) are ignored, because detections of a seated person flicker for a frame or two.
+
+### Table config
+
+Each video or camera has its table layout in `backend/configs/<video_id>.json`:
+
+```json
+{
+  "video_id": "restaurant",
+  "source": "rtsp://localhost:8554/cam1",
+  "frame_width": 640,
+  "frame_height": 360,
+  "tables": [
+    { "id": "T1", "name": "Table 1", "polygon": [[20, 250], [140, 250], [170, 355], [20, 355]] }
+  ],
+  "occupancy": {
+    "confidence_threshold": 0.15,
+    "enter_seconds": 5,
+    "leave_seconds": 10,
+    "reference_point": "bottom_center",
+    "presence_hold_seconds": 1.0
+  }
+}
+```
+
+Polygons are in pixels of a `frame_width` x `frame_height` frame and are scaled automatically when the live frames have another size. `source` is where frames come from: point it at a real CCTV camera (`rtsp://user:pass@192.168.1.20:554/stream`) and nothing else changes. New configs take their `occupancy` values from `ENTER_SECONDS`, `LEAVE_SECONDS`, `REFERENCE_POINT` and `CONFIDENCE_THRESHOLD` in `backend/.env`.
+
 More run steps will be added as each part is finished. The goal is a single `run_all.bat` that starts the backend (which starts MediaMTX by itself) and the dashboard.
 
 ## Tests
@@ -184,8 +230,12 @@ python -m pytest backend
 │   ├── app/                   # FastAPI application
 │   │   ├── settings.py        # typed settings from backend/.env
 │   │   ├── sources.py         # FrameSource: file / stream / webcam reader
-│   │   └── detector.py        # PersonDetector: YOLO + ByteTrack
-│   ├── scripts/               # developer tools (source / detection preview)
+│   │   ├── detector.py        # PersonDetector: YOLO + ByteTrack
+│   │   ├── schemas.py         # table config models
+│   │   ├── config_store.py    # load / save configs/<video_id>.json
+│   │   ├── occupancy.py       # per-table AVAILABLE / OCCUPIED state machine
+│   │   └── annotator.py       # draws tables, people and the status overlay
+│   ├── scripts/               # preview_source, preview_detection, draw_tables, preview_occupancy
 │   ├── models/                # YOLO weights, downloaded on first use (gitignored)
 │   ├── configs/               # <video_id>.json table configs
 │   ├── tests/                 # pytest tests

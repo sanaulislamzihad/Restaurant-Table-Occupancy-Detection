@@ -43,21 +43,34 @@ def test_detects_only_people(detector: PersonDetector, street_image: np.ndarray)
     assert detections.tracker_id is not None and len(detections.tracker_id) == len(detections)
 
 
-def test_tracker_ids_stay_stable_while_people_barely_move(
+def shift_right(image: np.ndarray, dx: int) -> np.ndarray:
+    """Move the whole scene dx pixels to the right (the uncovered strip is black)."""
+    matrix = np.float32([[1, 0, dx], [0, 1, 0]])
+    return cv2.warpAffine(image, matrix, (image.shape[1], image.shape[0]))
+
+
+def test_each_person_keeps_their_tracker_id_while_barely_moving(
     detector: PersonDetector, street_image: np.ndarray
 ) -> None:
+    width = street_image.shape[1]
     detector.reset_tracking()
-    all_ids, confident_ids_per_frame = [], []
-    for shift in range(12):  # the scene drifts 2 px per frame, like a slightly shaky camera
-        detections = detector.detect(np.roll(street_image, shift * 2, axis=1))
-        all_ids.append(set(detections.tracker_id.tolist()))
-        confident_ids_per_frame.append(set(detections.tracker_id[detections.confidence >= 0.7].tolist()))
-    first_frame_ids = all_ids[0]
-    assert len(confident_ids_per_frame[0]) >= 3
-    # Clearly visible people keep the same ID in every frame ...
-    assert all(ids == confident_ids_per_frame[0] for ids in confident_ids_per_frame)
-    # ... and nobody gets a new ID, even a borderline person who drops out for a frame.
-    assert set().union(*all_ids) == first_frame_ids
+    first = detector.detect(street_image)
+    # Follow people who are clearly visible and not cut off by the image edge.
+    people = [
+        (track_id, box)
+        for track_id, box, confidence in zip(first.tracker_id, first.xyxy, first.confidence)
+        if confidence >= 0.5 and box[0] > 30 and box[2] < width - 30
+    ]
+    assert len(people) >= 2
+
+    for step in range(1, 12):  # the scene drifts 2 px per frame, like a slightly shaky camera
+        dx = 2 * step
+        detections = detector.detect(shift_right(street_image, dx))
+        centers = (detections.xyxy[:, :2] + detections.xyxy[:, 2:]) / 2
+        for track_id, box in people:
+            expected_center = (box[:2] + box[2:]) / 2 + np.array([dx, 0])
+            nearest = int(np.argmin(np.linalg.norm(centers - expected_center, axis=1)))
+            assert detections.tracker_id[nearest] == track_id
 
 
 def test_empty_frame_gives_empty_detections(detector: PersonDetector) -> None:

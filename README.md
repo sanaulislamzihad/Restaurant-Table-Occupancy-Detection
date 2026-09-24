@@ -124,7 +124,7 @@ The backend starts MediaMTX by itself (unless an RTSP server already listens on 
 Until the dashboard is ready, use the interactive docs at <http://127.0.0.1:8000/docs>:
 
 1. **Upload:** `POST /api/videos` → *Try it out* → choose a file (mp4, avi, mov or mkv, up to `MAX_UPLOAD_MB`) → *Execute*. The answer contains the video's `id`, its duration, size and frame rate. Videos copied into `fake_camera/videos/` by hand are added when the backend starts, with their file name as ID (`restaurant.mp4` → `restaurant`), so an existing `backend/configs/restaurant.json` applies to them.
-2. **Stream:** `POST /api/stream/start` with `{"video_id": "<id>"}`. ffmpeg loops the video in real time to `rtsp://localhost:8554/cam1`, and the pipeline switches to that video's tables. Starting another video switches over and the pipeline reconnects by itself; `POST /api/stream/stop` stops it.
+2. **Stream:** `POST /api/stream/start` with `{"video_id": "<id>"}`, using an `id` from `GET /api/videos` (an unknown id answers 404 with the list of valid ids). ffmpeg loops the video in real time to `rtsp://localhost:8554/cam1`, and the pipeline switches to that video's tables. Starting another video switches over and the pipeline reconnects by itself; `POST /api/stream/stop` stops it. While no video is streaming the pipeline is idle and the live view shows NO SOURCE.
 3. **Watch:** <http://127.0.0.1:8000/api/stream> for the annotated video, or VLC → *Open Network Stream* → `rtsp://localhost:8554/cam1` for the raw camera.
 4. **Tables:** if the video has none yet (`has_tables` is false), draw them with `python backend/scripts/draw_tables.py <id>` (see below).
 

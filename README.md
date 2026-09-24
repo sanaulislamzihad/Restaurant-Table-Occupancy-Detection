@@ -4,7 +4,7 @@ Detects whether each table in a restaurant is **AVAILABLE** or **OCCUPIED** from
 
 There is no live camera yet, so uploaded CCTV footage is played as a looping **fake RTSP camera** (MediaMTX + ffmpeg). The detection pipeline reads that RTSP stream exactly like a real camera, so moving to a real CCTV camera later is a config change, not a code change.
 
-> **Status:** work in progress. The fake RTSP camera, person detection with tracking, per-table occupancy and the backend API with an annotated live stream work; video upload and the dashboard are being built.
+> **Status:** work in progress. The backend works end to end: video upload, the fake RTSP camera (MediaMTX + ffmpeg managed by the backend), person detection with tracking, per-table occupancy and an annotated live stream with a REST/WebSocket API. The React dashboard is being built.
 
 ## How it works
 
@@ -108,7 +108,53 @@ All paths, ports, URLs and tuning values live in `backend/.env` or in the per-vi
 
 ## Running
 
-### Fake CCTV camera (manual)
+### Start the backend
+
+From the `backend` folder, with the virtual environment active:
+
+```bash
+cd backend
+python -m app
+```
+
+The backend starts MediaMTX by itself (unless an RTSP server already listens on the port of `FAKE_CAMERA_RTSP_URL`; set `MANAGE_MEDIAMTX=false` to never start it), loads the detection model and serves the API on `API_HOST`:`API_PORT` (default <http://127.0.0.1:8000>, interactive docs at <http://127.0.0.1:8000/docs>). `Ctrl+C` stops everything within a second. ffmpeg and MediaMTX are tied to the backend process, so they never keep running after it, even if it crashes or is killed.
+
+### Upload a video and stream it as a fake camera
+
+Until the dashboard is ready, use the interactive docs at <http://127.0.0.1:8000/docs>:
+
+1. **Upload:** `POST /api/videos` → *Try it out* → choose a file (mp4, avi, mov or mkv, up to `MAX_UPLOAD_MB`) → *Execute*. The answer contains the video's `id`, its duration, size and frame rate. Videos copied into `fake_camera/videos/` by hand are added when the backend starts, with their file name as ID (`restaurant.mp4` → `restaurant`), so an existing `backend/configs/restaurant.json` applies to them.
+2. **Stream:** `POST /api/stream/start` with `{"video_id": "<id>"}`. ffmpeg loops the video in real time to `rtsp://localhost:8554/cam1`, and the pipeline switches to that video's tables. Starting another video switches over and the pipeline reconnects by itself; `POST /api/stream/stop` stops it.
+3. **Watch:** <http://127.0.0.1:8000/api/stream> for the annotated video, or VLC → *Open Network Stream* → `rtsp://localhost:8554/cam1` for the raw camera.
+4. **Tables:** if the video has none yet (`has_tables` is false), draw them with `python backend/scripts/draw_tables.py <id>` (see below).
+
+`python -m app --video <id>` (or `DEFAULT_VIDEO_ID` in `backend/.env`) starts streaming that video right away. For a table config that is not an uploaded video, for example a real camera, it just watches the config's `source`.
+
+### API
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | Pipeline, model, source, MediaMTX and ffmpeg state, processing and stream FPS |
+| POST | `/api/videos` | Upload a video (multipart field `file`) |
+| GET | `/api/videos` | Uploaded videos with metadata, table count and streaming flag |
+| GET | `/api/videos/{id}/thumbnail` | First frame as a JPEG |
+| DELETE | `/api/videos/{id}` | Delete a video, its thumbnail and table config (stops its stream first) |
+| POST | `/api/stream/start` | Body `{"video_id": ...}`: stream that video as the fake CCTV camera |
+| POST | `/api/stream/stop` | Stop the fake camera |
+| GET | `/api/stream/status` | Current video; running, stopped or error (with ffmpeg's last messages) |
+| GET | `/api/stream` | Annotated live video (MJPEG, usable as `<img src>`) |
+| GET | `/api/snapshot` | One raw JPEG frame, e.g. for the table editor |
+| GET | `/api/tables` | Current status of every table |
+| GET | `/api/events?limit=50` | Recent table status changes, newest first (stored in SQLite) |
+| GET | `/api/config` | Table config of the active video |
+| PUT | `/api/config/tables` | Save new table outlines; the live view uses them at once |
+| WS | `/ws/status` | Pushes `{"type": "status", "data": ...}` on every change and every second, and `{"type": "event", "data": ...}` for each table status change |
+
+How it runs (`backend/app/pipeline.py`): a frame thread reads every frame, draws the latest results on it and keeps the newest JPEG, so the video stays smooth (~20 fps). A detection thread takes the newest frame and runs YOLO, tracking and the occupancy state machine as fast as the CPU allows (~6 fps with `yolo26s` on an i5-1235U), stores status changes in `backend/data/app.db` and pushes updates to WebSocket clients. Saving new table outlines keeps the state of tables whose ID stays the same, so an occupied table does not reset. `backend/app/stream_manager.py` runs MediaMTX and ffmpeg; if ffmpeg stops on its own, `/api/stream/status` reports `error` and the video shows RECONNECTING until the stream is started again.
+
+### Developer tools
+
+#### Fake CCTV camera without the backend
 
 1. Copy a restaurant video (`.mp4`, `.avi`, `.mov` or `.mkv`) into `fake_camera/videos/`.
 2. Start the camera from the project folder:
@@ -123,9 +169,9 @@ All paths, ports, URLs and tuning values live in `backend/.env` or in the per-vi
    - **VLC:** Media → Open Network Stream → `rtsp://localhost:8554/cam1`
    - **ffplay** (installed with ffmpeg): `ffplay -rtsp_transport tcp rtsp://localhost:8554/cam1`
 
-The stream URL and port come from `FAKE_CAMERA_RTSP_URL` in `backend/.env`. Only RTSP over TCP is enabled in `fake_camera/mediamtx.yml`. If Windows asks for firewall access for MediaMTX, **Cancel** keeps the camera reachable from this computer only.
+The stream URL and port come from `FAKE_CAMERA_RTSP_URL` in `backend/.env`. Only RTSP over TCP is enabled in `fake_camera/mediamtx.yml`. If Windows asks for firewall access for MediaMTX, **Cancel** keeps the camera reachable from this computer only. Do not run this and a backend stream at the same time: both would publish to the same URL.
 
-### Preview a video source
+#### Preview a video source
 
 `FrameSource` (`backend/app/sources.py`) reads frames from a video file, an RTSP/HTTP stream or a webcam with the same code. It keeps only the newest frame, reconnects to streams and webcams by itself, and plays files at their own frame rate on a loop. To see it working (with the virtual environment active):
 
@@ -137,7 +183,7 @@ python backend/scripts/preview_source.py 0                                # webc
 
 The window shows the source status (LIVE, RECONNECTING, ...), its frame rate and the frame size. While previewing the RTSP URL, stop the fake camera: the status switches to RECONNECTING, and the picture comes back by itself when the camera starts again. Press `q` or `Esc` to quit.
 
-### Preview person detection and tracking
+#### Preview person detection and tracking
 
 `PersonDetector` (`backend/app/detector.py`) runs Ultralytics YOLO (person class only) with ByteTrack, so every person gets an ID that stays the same across frames. The weights are downloaded into `backend/models/` on first use. It runs on an NVIDIA GPU automatically when CUDA is available, otherwise on the CPU.
 
@@ -160,9 +206,9 @@ Model choice, measured on a 640x360 overhead restaurant CCTV clip (about 25 peop
 
 The default detects about four times more people than `yolo11n`; the people it still misses are mostly hidden behind the counter or tables. Occupancy only needs a few detections per second, so ~6 per second on a CPU is enough. Set `YOLO_MODEL=yolo11n.pt` for a much faster but less accurate model.
 
-### Draw the tables and watch occupancy
+#### Draw the tables and watch occupancy
 
-1. Start the fake camera (or have a real camera URL ready).
+1. Stream the video (backend or manual fake camera), or have a real camera URL ready.
 2. Draw the tables once:
 
    ```bash
@@ -180,32 +226,6 @@ The default detects about four times more people than `yolo11n`; the people it s
    Green = AVAILABLE, red = OCCUPIED, yellow = waiting to change (PENDING). Every status change is printed, and the bottom line shows how many tables are free.
 
 How a table decides (`backend/app/occupancy.py`): a person counts as "at" a table when the bottom centre of their box (or its centre, see `reference_point`) is inside the table's outline. A table becomes OCCUPIED only after someone has been there continuously for `enter_seconds` (a passer-by does not count), and AVAILABLE only after it has been empty continuously for `leave_seconds`. Timing uses the clock, not the frame count, so it behaves the same at any frame rate. Detection gaps shorter than `presence_hold_seconds` (1 s) are ignored, because detections of a seated person flicker for a frame or two.
-
-### Backend API and live pipeline
-
-Start the fake camera, then the backend from the `backend` folder (virtual environment active):
-
-```bash
-cd backend
-python -m app --video restaurant      # watch the "restaurant" table config
-```
-
-`--video` chooses the table config, and with it the camera, to watch; `DEFAULT_VIDEO_ID` in `backend/.env` does the same without the flag. Host and port come from `API_HOST` and `API_PORT`. `Ctrl+C` stops everything within a second, even with browser tabs still streaming.
-
-Then open <http://127.0.0.1:8000/api/stream> for the annotated live video and <http://127.0.0.1:8000/docs> for the interactive API docs.
-
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/api/health` | Pipeline, model, source and MediaMTX state, processing and stream FPS |
-| GET | `/api/stream` | Annotated live video (MJPEG, usable as `<img src>`) |
-| GET | `/api/snapshot` | One raw JPEG frame, e.g. for the table editor |
-| GET | `/api/tables` | Current status of every table |
-| GET | `/api/events?limit=50` | Recent table status changes, newest first (stored in SQLite) |
-| GET | `/api/config` | Table config of the active video |
-| PUT | `/api/config/tables` | Save new table outlines; the live view uses them at once |
-| WS | `/ws/status` | Pushes `{"type": "status", "data": ...}` on every change and every second, and `{"type": "event", "data": ...}` for each table status change |
-
-How it runs (`backend/app/pipeline.py`): a frame thread reads every frame, draws the latest results on it and keeps the newest JPEG, so the video stays smooth (~20 fps). A detection thread takes the newest frame and runs YOLO, tracking and the occupancy state machine as fast as the CPU allows (~6 fps with `yolo26s` on an i5-1235U), stores status changes in `backend/data/app.db` and pushes updates to WebSocket clients. Saving new table outlines keeps the state of tables whose ID stays the same, so an occupied table does not reset.
 
 ### Table config
 
@@ -257,7 +277,10 @@ python -m pytest backend
 │   │   ├── __main__.py        # `python -m app`: runs the server
 │   │   ├── main.py            # API routes, MJPEG stream, WebSocket
 │   │   ├── pipeline.py        # live pipeline (frame + detection threads)
-│   │   ├── db.py              # SQLite event storage
+│   │   ├── stream_manager.py  # runs MediaMTX and ffmpeg (the fake camera)
+│   │   ├── process_guard.py   # child processes never outlive the backend
+│   │   ├── videos.py          # uploads, metadata, thumbnails, delete
+│   │   ├── db.py              # SQLite: events and video metadata
 │   │   ├── broadcaster.py     # pushes status/events to WebSocket clients
 │   │   ├── settings.py        # typed settings from backend/.env
 │   │   ├── sources.py         # FrameSource: file / stream / webcam reader

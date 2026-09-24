@@ -8,11 +8,18 @@ Usage (from the project folder, with the virtual environment active):
 The config is saved as <CONFIGS_DIR>/<video_id>.json. If it already exists, its
 tables are loaded for editing and its occupancy settings are kept.
 
+The people found in the frame are marked with white dots: the point that has
+to be inside a table outline for that table to count the person. Draw each
+outline around the table and its chairs so the dots of the seated people fall
+inside it.
+
 Controls:
-    left click            add a corner to the current table
-    right click / Enter   finish the current table (needs 3+ corners)
+    left click            add a corner to the current table (click around the table,
+                          e.g. its 4 outer corners including the chairs)
+    right click / Enter   finish the current table
     Backspace             undo the last corner (or remove the last table)
     c                     clear all tables
+    h                     show / hide the help text
     s                     save and quit
     q / Esc               quit without saving
 """
@@ -30,16 +37,23 @@ from loguru import logger
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # makes the "app" package importable
 
-from app.annotator import BLACK, YELLOW, put_label  # noqa: E402
+from app.annotator import BLACK, RED, WHITE, YELLOW, put_label  # noqa: E402
 from app.config_store import ConfigStore, default_occupancy  # noqa: E402
-from app.schemas import TableConfig, TableDef  # noqa: E402
+from app.detector import PersonDetector  # noqa: E402
+from app.geometry import outline_problem, tidy_polygon  # noqa: E402
+from app.occupancy import anchor_position  # noqa: E402
+from app.schemas import OccupancySettings, TableConfig, TableDef  # noqa: E402
 from app.settings import Settings, get_settings  # noqa: E402
 from app.sources import FrameSource, redact  # noqa: E402
 
 WINDOW = "Draw tables"
 MAX_DISPLAY_SIZE = (1280, 720)  # small CCTV frames are enlarged to this, big ones shrunk
 TABLE_COLOR = (255, 200, 0)
-HELP = "Left click: corner | Right click/Enter: finish table | Backspace: undo | c: clear | s: save | q: quit"
+HELP_LINES = [
+    "Click the corners around a table and its chairs (4 is usually enough), then right-click or Enter.",
+    "White dots = people's reference points. They must be inside a table's outline to count.",
+    "Backspace: undo | c: clear all | s: save | q: quit | h: hide this help",
+]
 KEY_ENTER, KEY_BACKSPACE, KEY_ESC = 13, 8, 27
 
 
@@ -53,15 +67,31 @@ def grab_frame(source: str, settings: Settings) -> np.ndarray:
     return frame
 
 
+def people_anchor_points(frame: np.ndarray, settings: Settings, occupancy: OccupancySettings) -> np.ndarray:
+    """Reference points of the people in the frame (empty if detection is unavailable)."""
+    try:
+        detector = PersonDetector.from_settings(settings, confidence=occupancy.confidence_threshold)
+        detections = detector.detect(frame)
+    except Exception as error:  # drawing still works without the hints
+        logger.warning("Could not detect people for the hints: {}", error)
+        return np.empty((0, 2))
+    return detections.get_anchors_coordinates(anchor_position(occupancy.reference_point))
+
+
 class TableEditor:
     """Mouse and keyboard polygon editing on one frame (all coordinates in frame pixels)."""
 
-    def __init__(self, frame: np.ndarray, tables: list[TableDef]) -> None:
+    def __init__(self, frame: np.ndarray, tables: list[TableDef], people: np.ndarray) -> None:
         self.frame = frame
         height, width = frame.shape[:2]
+        self.frame_size = (width, height)
         self.scale = min(MAX_DISPLAY_SIZE[0] / width, MAX_DISPLAY_SIZE[1] / height)
         self.tables = list(tables)
-        self.points: list[tuple[int, int]] = []
+        self.people = people
+        self.points: list[tuple[float, float]] = []
+        self.message = "Draw the first table."
+        self.message_is_error = False
+        self.show_help = True
 
     def on_mouse(self, event: int, x: int, y: int, _flags: int, _param: object) -> None:
         if event == cv2.EVENT_LBUTTONDOWN:
@@ -70,32 +100,60 @@ class TableEditor:
             self.finish_table()
 
     def finish_table(self) -> None:
-        if len(self.points) < 3:
+        if not self.points:
+            return
+        points = tidy_polygon(self.points)  # fixes corners clicked in a criss-cross order
+        problem = outline_problem(points, self.frame_size)
+        if problem:
+            self.message, self.message_is_error = f"Not added: {problem}. Undo with Backspace and try again.", True
             return
         used = {table.id for table in self.tables}
         number = next(n for n in itertools.count(1) if f"T{n}" not in used)
-        self.tables.append(TableDef(id=f"T{number}", name=f"Table {number}", polygon=self.points))
+        table = TableDef(id=f"T{number}", name=f"Table {number}", polygon=[(round(x), round(y)) for x, y in points])
+        self.tables.append(table)
         self.points = []
+        self.message, self.message_is_error = f"{table.name} added ({len(self.tables)} in total).", False
 
     def undo(self) -> None:
         if self.points:
             self.points.pop()
         elif self.tables:
-            self.tables.pop()
+            removed = self.tables.pop()
+            self.message, self.message_is_error = f"{removed.name} removed.", False
+
+    def _to_display(self, points: list[tuple[float, float]]) -> np.ndarray:
+        return np.rint(np.array(points, dtype=float) * self.scale).astype(np.int32)
 
     def render(self) -> np.ndarray:
         image = cv2.resize(self.frame, None, fx=self.scale, fy=self.scale, interpolation=cv2.INTER_LINEAR)
+        fill = image.copy()
+        shapes = [(self._to_display(t.polygon), TABLE_COLOR) for t in self.tables]
+        if len(self.points) >= 3:
+            shapes.append((self._to_display(self.points), YELLOW))
+        for points, color in shapes:
+            cv2.fillPoly(fill, [points], color)
+        cv2.addWeighted(fill, 0.3, image, 0.7, 0, dst=image)
         for table in self.tables:
-            points = np.rint(np.array(table.polygon) * self.scale).astype(np.int32)
+            points = self._to_display(table.polygon)
             cv2.polylines(image, [points], isClosed=True, color=TABLE_COLOR, thickness=2, lineType=cv2.LINE_AA)
             top = points[np.argmin(points[:, 1])]
-            put_label(image, table.name, (int(points[:, 0].min()), int(top[1]) - 4), TABLE_COLOR, 0.6, BLACK)
-        current = [(round(x * self.scale), round(y * self.scale)) for x, y in self.points]
-        for start, end in zip(current, current[1:]):
-            cv2.line(image, start, end, YELLOW, 2, cv2.LINE_AA)
-        for point in current:
-            cv2.circle(image, point, 5, YELLOW, cv2.FILLED)
-        put_label(image, HELP, (6, image.shape[0] - 6), (40, 40, 40), 0.5)
+            put_label(image, table.name, (int(points[:, 0].min()), int(top[1]) - 4), TABLE_COLOR, 0.55, BLACK)
+
+        if self.points:  # the table being drawn, shown closed so its shape is obvious
+            current = self._to_display(self.points)
+            cv2.polylines(image, [current], isClosed=len(current) >= 3, color=YELLOW, thickness=2,
+                          lineType=cv2.LINE_AA)
+            for point in current:
+                cv2.circle(image, tuple(int(v) for v in point), 5, YELLOW, cv2.FILLED)
+
+        for x, y in self.people * self.scale:
+            cv2.circle(image, (int(x), int(y)), 6, BLACK, cv2.FILLED)
+            cv2.circle(image, (int(x), int(y)), 4, WHITE, cv2.FILLED)
+
+        lines = HELP_LINES if self.show_help else []
+        for i, line in enumerate(lines):
+            put_label(image, line, (6, 26 + i * 26), (40, 40, 40), 0.5)
+        put_label(image, self.message, (6, 32 + len(lines) * 26), RED if self.message_is_error else (40, 40, 40), 0.6)
         return image
 
 
@@ -112,13 +170,20 @@ def main() -> int:
 
     store = ConfigStore(settings.configs_dir)
     existing = store.load(args.video_id)
+    occupancy = existing.occupancy if existing else default_occupancy(settings)
     source = args.source or (existing.source if existing else settings.fake_camera_rtsp_url)
     if Path(source).is_file():
         source = str(Path(source).resolve())  # keep working from any folder
     frame = grab_frame(source, settings)
     height, width = frame.shape[:2]
+    people = people_anchor_points(frame, settings, occupancy)
 
-    editor = TableEditor(frame, existing.tables_for_frame(width, height) if existing else [])
+    editor = TableEditor(frame, existing.tables_for_frame(width, height) if existing else [], people)
+    if existing:
+        bad = [t.name for t in editor.tables if outline_problem(t.polygon, (width, height))]
+        if bad:
+            editor.message = f"Check these outlines (too thin or crossed): {', '.join(bad)}. Press c to start over."
+            editor.message_is_error = True
     cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
     cv2.setMouseCallback(WINDOW, editor.on_mouse)
     saved = False
@@ -131,10 +196,14 @@ def main() -> int:
             editor.undo()
         elif key == ord("c"):
             editor.tables, editor.points = [], []
+            editor.message, editor.message_is_error = "All tables cleared.", False
+        elif key == ord("h"):
+            editor.show_help = not editor.show_help
         elif key == ord("s"):
             editor.finish_table()
-            saved = True
-            break
+            if not editor.points:  # an unfinished bad outline blocks saving so it is not lost silently
+                saved = True
+                break
         elif key in (ord("q"), KEY_ESC) or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
             break
     cv2.destroyAllWindows()
@@ -142,20 +211,19 @@ def main() -> int:
     if not saved:
         print("Not saved.")
         return 1
-    tables = [
-        table.model_copy(update={"polygon": [(round(x), round(y)) for x, y in table.polygon]})
-        for table in editor.tables
-    ]
     config = TableConfig(
         video_id=args.video_id,
         source=source,
         frame_width=width,
         frame_height=height,
-        tables=tables,
-        occupancy=existing.occupancy if existing else default_occupancy(settings),
+        tables=[
+            table.model_copy(update={"polygon": [(round(x), round(y)) for x, y in table.polygon]})
+            for table in editor.tables
+        ],
+        occupancy=occupancy,
     )
     path = store.save(config)
-    print(f"Saved {len(tables)} table(s) to {path}")
+    print(f"Saved {len(config.tables)} table(s) to {path}")
     return 0
 
 

@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # makes the "ap
 from app.annotator import FrameAnnotator, put_label  # noqa: E402
 from app.config_store import ConfigStore  # noqa: E402
 from app.detector import PersonDetector  # noqa: E402
+from app.geometry import outline_problem  # noqa: E402
 from app.occupancy import OccupancyTracker  # noqa: E402
 from app.settings import get_settings  # noqa: E402
 from app.sources import FrameSource  # noqa: E402
@@ -47,11 +48,17 @@ def main() -> int:
     if config is None or not config.tables:
         sys.exit(f"No tables for '{args.video_id}'. Draw them first: "
                  f"python backend/scripts/draw_tables.py {args.video_id}")
+    config_size = (config.frame_width, config.frame_height)
+    for table in config.tables:
+        problem = outline_problem(table.polygon, config_size)
+        if problem:
+            logger.warning("{} outline looks wrong ({}); nobody will be counted there. Redraw it with "
+                           "draw_tables.py {}", table.name, problem, args.video_id)
 
     detector = PersonDetector.from_settings(settings, confidence=config.occupancy.confidence_threshold)
     annotator = FrameAnnotator()
     tracker: OccupancyTracker | None = None
-    frame_size: tuple[int, int] | None = None
+    frame_size: tuple[int, int] | None = None  # size of the live frames the tables are scaled to
     tables = config.tables
     detections = sv.Detections.empty()
     last_frame: np.ndarray | None = None

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -56,6 +57,11 @@ class Settings(BaseSettings):
     yolo_img_size: int = Field(ge=32)
     confidence_threshold: float = Field(ge=0, le=1)
     detect_every_n_frames: int = Field(ge=1)
+
+    # Occupancy defaults for new table configs
+    enter_seconds: float = Field(ge=0)
+    leave_seconds: float = Field(ge=0)
+    reference_point: Literal["bottom_center", "center"]
 
     # Video source
     source_reconnect_seconds: float = Field(gt=0)

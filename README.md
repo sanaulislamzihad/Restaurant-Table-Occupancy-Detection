@@ -4,7 +4,7 @@ Detects whether each table in a restaurant is **AVAILABLE** or **OCCUPIED** from
 
 There is no live camera yet, so uploaded CCTV footage is played as a looping **fake RTSP camera** (MediaMTX + ffmpeg). The detection pipeline reads that RTSP stream exactly like a real camera, so moving to a real CCTV camera later is a config change, not a code change.
 
-> **Status:** work in progress. Video upload, the fake RTSP camera (MediaMTX + ffmpeg managed by the backend), person detection with tracking, per-table occupancy, the REST/WebSocket API and the dashboard's Videos and Live Monitor pages work, and tables are drawn in the browser. The analytics page is being built.
+> **Status:** work in progress. Video upload, the fake RTSP camera (MediaMTX + ffmpeg managed by the backend), person detection with tracking, per-table occupancy, the REST/WebSocket API and all four dashboard pages (Videos, Live Monitor, Table Setup, Analytics) work.
 
 ## How it works
 
@@ -35,7 +35,7 @@ Browser upload → backend saves video → ffmpeg loops it in real time
 | Zones and drawing | supervision + OpenCV |
 | Backend | FastAPI + Uvicorn, SQLite |
 | Live video / live status | MJPEG stream / WebSocket |
-| Frontend | React + Vite + Tailwind CSS, react-konva for the table editor |
+| Frontend | React + Vite + Tailwind CSS, react-konva for the table editor, recharts for the charts |
 
 ## Requirements
 
@@ -147,7 +147,9 @@ Then open <http://localhost:5173>.
   - **Suggest tables** adds outlines around the tables the detector recognises in the frame (grown over their chairs and seated people, without overlapping). Check them: adjust the corners, delete wrong ones and draw the missed ones.
   - **Copy from video** takes the tables of another video, scaled to this one; useful for a new recording of the same camera view.
   - Outlines that are too thin, too small or cross themselves are marked red and must be fixed before saving; overlapping outlines get a warning. **Save** stores them in `backend/configs/<id>.json`; if the video is streaming, the Live Monitor uses them right away.
-- **Analytics:** coming next.
+- **Analytics:** pick a video and a time range (15 min to all time). Shows the average occupancy, watched time, number of sessions (groups of guests) and average session length; a chart of the share of tables occupied over time (hover for details, or *Show as table*); and per table its occupancy, occupied time, sessions, average and longest session. While the video is live it updates every 10 seconds.
+
+  Occupancy is only counted while a video streams with its tables. Each stretch of streaming is stored as a *run*; every run starts with all tables AVAILABLE, and a table still occupied when the stream stops counts until the stop. So stopped time, or time the backend was off, never counts as occupied. A session lasts from when the guests arrived until they left, the same rule as the Live Monitor's timer.
 
 ### Upload a video and stream it with the API
 
@@ -171,7 +173,7 @@ The same actions are available in the interactive docs at <http://127.0.0.1:8000
 | GET | `/api/videos/{id}/editor-frame?at=1` | A frame to draw on (live if the video is streaming, else from the file at `at` seconds) with people's points and suggested table outlines |
 | GET | `/api/videos/{id}/config` | Table config of any video |
 | PUT | `/api/videos/{id}/tables` | Save table outlines of any video; if it is streaming, the live view uses them at once |
-| DELETE | `/api/videos/{id}` | Delete a video, its thumbnail and table config (stops its stream first) |
+| DELETE | `/api/videos/{id}` | Delete a video, its thumbnail, table config and analytics history (stops its stream first) |
 | POST | `/api/stream/start` | Body `{"video_id": ...}`: stream that video as the fake CCTV camera |
 | POST | `/api/stream/stop` | Stop the fake camera |
 | GET | `/api/stream/status` | Current video; running, stopped or error (with ffmpeg's last messages) |
@@ -181,9 +183,11 @@ The same actions are available in the interactive docs at <http://127.0.0.1:8000
 | GET | `/api/events?limit=50` | Recent table status changes, newest first (stored in SQLite) |
 | GET | `/api/config` | Table config of the active video |
 | PUT | `/api/config/tables` | Save new table outlines of the active video; the live view uses them at once |
+| GET | `/api/analytics?video_id=&since=&until=` | Per-table occupied time and sessions, and occupancy over time (defaults: the live video, all its recorded time) |
+| GET | `/api/analytics/videos` | Videos with recorded streaming time |
 | WS | `/ws/status` | Pushes `{"type": "status", "data": ...}` on every change and every second, and `{"type": "event", "data": ...}` for each table status change |
 
-How it runs (`backend/app/pipeline.py`): a frame thread reads every frame, draws the latest results on it and keeps the newest JPEG, so the video stays smooth (~20 fps). A detection thread takes the newest frame and runs YOLO, tracking and the occupancy state machine as fast as the CPU allows (~6 fps with `yolo26s` on an i5-1235U), stores status changes in `backend/data/app.db` and pushes updates to WebSocket clients. Saving new table outlines keeps the state of tables whose ID stays the same, so an occupied table does not reset. `backend/app/stream_manager.py` runs MediaMTX and ffmpeg; if ffmpeg stops on its own, `/api/stream/status` reports `error` and the video shows RECONNECTING until the stream is started again.
+How it runs (`backend/app/pipeline.py`): a frame thread reads every frame, draws the latest results on it and keeps the newest JPEG, so the video stays smooth (~20 fps). A detection thread takes the newest frame and runs YOLO, tracking and the occupancy state machine as fast as the CPU allows (~6 fps with `yolo26s` on an i5-1235U), stores status changes and the streaming runs in `backend/data/app.db` and pushes updates to WebSocket clients. Saving new table outlines keeps the state of tables whose ID stays the same, so an occupied table does not reset. `backend/app/stream_manager.py` runs MediaMTX and ffmpeg; if ffmpeg stops on its own, `/api/stream/status` reports `error` and the video shows RECONNECTING until the stream is started again.
 
 ### Developer tools
 
@@ -315,7 +319,8 @@ cd frontend && npm run build      # type check + production build
 │   │   ├── stream_manager.py  # runs MediaMTX and ffmpeg (the fake camera)
 │   │   ├── process_guard.py   # child processes never outlive the backend
 │   │   ├── videos.py          # uploads, metadata, thumbnails, delete
-│   │   ├── db.py              # SQLite: events and video metadata
+│   │   ├── db.py              # SQLite: events, streaming runs and video metadata
+│   │   ├── analytics.py       # sessions and occupancy statistics from the events
 │   │   ├── broadcaster.py     # pushes status/events to WebSocket clients
 │   │   ├── settings.py        # typed settings from backend/.env
 │   │   ├── sources.py         # FrameSource: file / stream / webcam reader

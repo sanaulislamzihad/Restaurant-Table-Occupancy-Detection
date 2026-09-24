@@ -66,3 +66,36 @@ export function connectionLabel(
   if (source === "RECONNECTING") return "RECONNECTING";
   return "OFFLINE";
 }
+
+/** A length of time in words: "45s", "4m 05s", "2h 07m". */
+export function formatSpan(seconds: number): string {
+  const total = Math.max(0, Math.round(seconds));
+  const pad = (value: number) => String(value).padStart(2, "0");
+  if (total < 60) return `${total}s`;
+  if (total < 3600) return `${Math.floor(total / 60)}m ${pad(total % 60)}s`;
+  return `${Math.floor(total / 3600)}h ${pad(Math.floor((total % 3600) / 60))}m`;
+}
+
+/** A 0..1 share as a whole percentage, or a dash when unknown. */
+export const formatPercent = (share: number | null): string => (share === null ? "–" : `${Math.round(share * 100)}%`);
+
+/** Chart step in words: "10 seconds", "minute", "6 hours". */
+export function bucketLabel(seconds: number): string {
+  if (seconds % 86400 === 0) return seconds === 86400 ? "day" : `${seconds / 86400} days`;
+  if (seconds % 3600 === 0) return seconds === 3600 ? "hour" : `${seconds / 3600} hours`;
+  if (seconds % 60 === 0) return seconds === 60 ? "minute" : `${seconds / 60} minutes`;
+  return `${seconds} seconds`;
+}
+
+/** Axis label of a time: seconds only for short steps, the date only for steps of a day or more. */
+export function formatTick(unixSeconds: number, bucketSeconds: number, withDate = false): string {
+  const date = new Date(unixSeconds * 1000);
+  if (bucketSeconds >= 86400) return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const time = date.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: bucketSeconds < 60 ? "2-digit" : undefined,
+    hour12: false,
+  });
+  return withDate ? `${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}` : time;
+}

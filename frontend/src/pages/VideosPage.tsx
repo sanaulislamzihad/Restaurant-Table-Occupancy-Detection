@@ -64,7 +64,7 @@ export default function VideosPage() {
     });
 
   const remove = (video: Video) => {
-    if (!window.confirm(`Delete "${video.name}"? Its table layout and thumbnail are deleted too.`)) return;
+    if (!window.confirm(`Delete "${video.name}"? Its table layout, thumbnail and analytics history are deleted too.`)) return;
     void run(video.id, () => api.deleteVideo(video.id));
   };
 

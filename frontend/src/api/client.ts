@@ -1,5 +1,15 @@
 // Calls to the backend REST API. The address comes from VITE_API_BASE_URL.
-import type { EditorFrame, StreamStatus, TableConfig, TableDef, TableEvent, UploadLimits, Video } from "./types";
+import type {
+  Analytics,
+  EditorFrame,
+  MonitoredVideo,
+  StreamStatus,
+  TableConfig,
+  TableDef,
+  TableEvent,
+  UploadLimits,
+  Video,
+} from "./types";
 
 export const API_BASE_URL = __API_BASE_URL__.replace(/\/+$/, "");
 
@@ -65,6 +75,14 @@ export const api = {
   editorFrame: (videoId: string, options: { at?: number; live?: boolean } = {}) => {
     const query = new URLSearchParams({ at: String(options.at ?? 1), live: String(options.live ?? true) });
     return request<EditorFrame>(`/api/videos/${encodeURIComponent(videoId)}/editor-frame?${query}`);
+  },
+  analyticsVideos: () => request<MonitoredVideo[]>("/api/analytics/videos"),
+  /** Statistics of one video (default: the live one) since a Unix time (default: all recorded time). */
+  analytics: (videoId?: string, since?: number) => {
+    const query = new URLSearchParams();
+    if (videoId) query.set("video_id", videoId);
+    if (since !== undefined) query.set("since", String(since));
+    return request<Analytics>(`/api/analytics?${query}`);
   },
   saveTables: (videoId: string, tables: TableDef[], frameWidth: number, frameHeight: number) =>
     request<TableConfig>(`/api/videos/${encodeURIComponent(videoId)}/tables`, {

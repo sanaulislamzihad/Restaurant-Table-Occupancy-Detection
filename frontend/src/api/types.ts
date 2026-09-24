@@ -119,3 +119,45 @@ export interface EditorFrame {
   suggested_tables: Point[][];
   hints_error: string | null;
 }
+
+export interface TableAnalytics {
+  id: string;
+  name: string;
+  occupied_seconds: number;
+  session_count: number;
+  average_session_seconds: number | null;
+  longest_session_seconds: number | null;
+  /** Occupied time / monitored time, 0 to 1. */
+  occupancy_rate: number | null;
+}
+
+export interface OccupancyPoint {
+  start: number;
+  end: number;
+  monitored_seconds: number;
+  /** Share of table time occupied, 0 to 1; null where the video was not watched. */
+  occupancy_rate: number | null;
+  occupied_tables: number | null;
+}
+
+export interface Analytics {
+  video_id: string | null;
+  since: number | null;
+  until: number;
+  bucket_seconds: number;
+  monitored_seconds: number;
+  table_count: number;
+  session_count: number;
+  average_occupancy: number | null;
+  tables: TableAnalytics[];
+  timeline: OccupancyPoint[];
+}
+
+export interface MonitoredVideo {
+  id: string;
+  name: string;
+  monitored_seconds: number;
+  first_started: number;
+  last_ended: number;
+  is_live: boolean;
+}

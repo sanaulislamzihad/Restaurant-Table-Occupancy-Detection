@@ -15,8 +15,10 @@
     "lucide-react": "1.48.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "react-is": "19.3.0",
     "react-konva": "19.3.0",
-    "react-router-dom": "7.18.4"
+    "react-router-dom": "7.18.4",
+    "recharts": "3.10.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.3.3",

@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import type { TableEvent } from "../api/types";
-import { connectionLabel, formatBytes, formatDuration, isLogWorthy, uploadProblem } from "./format";
+import {
+  bucketLabel,
+  connectionLabel,
+  formatBytes,
+  formatDuration,
+  formatPercent,
+  formatSpan,
+  isLogWorthy,
+  uploadProblem,
+} from "./format";
 
 const limits = { max_upload_mb: 1, extensions: [".mp4", ".avi", ".mov", ".mkv"] };
 
@@ -61,5 +70,24 @@ describe("connectionLabel", () => {
     expect(connectionLabel(true, 0, "NO SOURCE")).toBe("OFFLINE");
     expect(connectionLabel(false, 1, "LIVE")).toBe("RECONNECTING");
     expect(connectionLabel(false, 3, "LIVE")).toBe("OFFLINE");
+  });
+});
+
+describe("analytics formats", () => {
+  it("writes lengths of time in words", () => {
+    expect(formatSpan(0)).toBe("0s");
+    expect(formatSpan(44.6)).toBe("45s");
+    expect(formatSpan(245)).toBe("4m 05s");
+    expect(formatSpan(7620)).toBe("2h 07m");
+  });
+
+  it("writes shares and chart steps", () => {
+    expect(formatPercent(0.354)).toBe("35%");
+    expect(formatPercent(null)).toBe("–");
+    expect(bucketLabel(10)).toBe("10 seconds");
+    expect(bucketLabel(60)).toBe("minute");
+    expect(bucketLabel(900)).toBe("15 minutes");
+    expect(bucketLabel(21600)).toBe("6 hours");
+    expect(bucketLabel(86400)).toBe("day");
   });
 });

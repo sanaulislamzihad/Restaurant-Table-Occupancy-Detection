@@ -107,12 +107,14 @@ class Pipeline:
         db: Database,
         broadcaster: Broadcaster,
         detector_factory: Callable[[Settings], Detector] = PersonDetector.from_settings,
+        source_factory: Callable[[str, Settings], FrameSource] = FrameSource.from_settings,
     ) -> None:
         self.settings = settings
         self._store = store
         self._db = db
         self._broadcaster = broadcaster
         self._detector_factory = detector_factory
+        self._source_factory = source_factory
         self._annotator = FrameAnnotator()
 
         self._lock = threading.RLock()  # guards everything below
@@ -128,6 +130,9 @@ class Pipeline:
         # The open monitoring run (see db.py): (run id, video id), while a video with tables is watched.
         self._run: tuple[int, str] | None = None
         self._run_heartbeat = 0.0
+        # An outage: no frames for SOURCE_OUTAGE_SECONDS. The run ended at the last frame.
+        self._last_frame_at = time.time()
+        self._outage = False
 
         # Latest data.
         self._frame: np.ndarray | None = None
@@ -229,11 +234,12 @@ class Pipeline:
                 old_source, self._source, self._frame = self._source, None, None
             elif self._source is None or self._source.source != source_url or video_id != self._video_id:
                 old_source = self._source
-                self._source = FrameSource.from_settings(source_url, self.settings)
+                self._source = self._source_factory(source_url, self.settings)
                 self._frame = None
             self._video_id, self._config = video_id, config
             self._generation += 1
             self._results = Results()
+            self._outage, self._last_frame_at = False, time.time()
             self._sync_run(new_run=True)  # occupancy starts over, and so does the run
         if old_source is not None:
             # Closing can wait for a blocked read; do not hold up the caller.
@@ -267,15 +273,16 @@ class Pipeline:
         logger.info("Saved {} tables for {}", len(new_config.tables), video_id)
         return new_config
 
-    def _sync_run(self, new_run: bool) -> None:
+    def _sync_run(self, new_run: bool, at: float | None = None) -> None:
         """Keep one open run while a video with tables is watched (call with the lock held).
 
         ``new_run`` ends the current run and starts another, for when occupancy
-        starts over. Database errors are logged, never raised: they must not
-        stop the live view.
+        starts over; ``at`` is when that happens (default: now). Database
+        errors are logged, never raised: they must not stop the live view.
         """
-        now = time.time()
-        watched = self._video_id if (self._config and self._config.tables and not self._stop.is_set()) else None
+        now = time.time() if at is None else at
+        watching = self._config and self._config.tables and not self._outage and not self._stop.is_set()
+        watched = self._video_id if watching else None
         try:
             if self._run and (new_run or self._run[1] != watched):
                 self._db.end_run(self._run[0], now)
@@ -285,6 +292,34 @@ class Pipeline:
                 self._run_heartbeat = time.monotonic()
         except Exception:
             logger.exception("Could not record the monitoring run")
+
+    def _check_outage(self) -> None:
+        """End the run at the last frame once no frame has arrived for SOURCE_OUTAGE_SECONDS.
+
+        The table states are stale by then (nobody is watching), so that time
+        must not count, and occupancy starts over when frames come back.
+        """
+        with self._lock:
+            if self._run is None or self._outage:
+                return
+            silent = time.time() - self._last_frame_at
+            if silent < self.settings.source_outage_seconds:
+                return
+            self._outage = True
+            run, self._run = self._run, None
+            try:
+                self._db.end_run(run[0], self._last_frame_at)
+            except Exception:
+                logger.exception("Could not record the end of the monitoring run")
+        logger.warning("No frames for {:.0f} s: occupancy is not counted until the video is back", silent)
+
+    def _resume_after_outage(self) -> None:
+        """Frames are back after an outage: occupancy starts over (call with the lock held)."""
+        self._outage = False
+        self._generation += 1  # the detection thread starts tracking from scratch
+        self._results = Results()
+        self._sync_run(new_run=False, at=self._last_frame_at)  # from the frame that ended the outage
+        logger.info("Frames are back: occupancy starts over")
 
     def _touch_run(self) -> None:
         """Update the open run's heartbeat every RUN_HEARTBEAT_SECONDS."""
@@ -378,6 +413,9 @@ class Pipeline:
                             continue
                         self._frame = frame
                         self._frame_seq += 1
+                        self._last_frame_at = time.time()
+                        if self._outage:
+                            self._resume_after_outage()
                         self._frame_ready.notify_all()
                     self._render(frame)
                     self._streaming.tick()
@@ -387,6 +425,8 @@ class Pipeline:
                         last_frame = self._frame
                     self._render(last_frame)  # keeps the overlay (RECONNECTING, clock) up to date
                     last_render = time.monotonic()
+                if frame is None:
+                    self._check_outage()
                 self._publish_status()
                 self._touch_run()
             except Exception:  # keep streaming whatever happens to one frame
@@ -445,8 +485,8 @@ class Pipeline:
                 if frames_waiting < self.settings.detect_every_n_frames:
                     continue
                 frames_waiting = 0
-                frame, config, video_id, current_generation = (
-                    self._frame, self._config, self._video_id, self._generation,
+                frame, frame_time, config, video_id, current_generation = (
+                    self._frame, self._last_frame_at, self._config, self._video_id, self._generation,
                 )
             try:
                 if current_generation != generation:  # another video: start tracking from scratch
@@ -469,7 +509,8 @@ class Pipeline:
                     config.occupancy.confidence_threshold if config else self.settings.confidence_threshold
                 )
                 detections = detector.detect(frame)
-                events = tracker.update(detections) if tracker else []
+                # Timed by when the frame arrived, so events never fall after the end of its run.
+                events = tracker.update(detections, now=frame_time) if tracker else []
                 self._processing.tick()
 
                 results = Results(

@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     cors_origins: str
     log_level: str
     log_dir: Path
+    log_rotation_mb: int = Field(gt=0)
+    log_retention_files: int = Field(ge=1)
 
     # External tools
     ffmpeg_path: str
@@ -72,6 +74,7 @@ class Settings(BaseSettings):
     source_open_timeout_seconds: float = Field(gt=0)
     source_read_timeout_seconds: float = Field(gt=0)
     loop_video_files: bool
+    source_outage_seconds: float = Field(gt=0)
 
     @field_validator("log_dir", "mediamtx_config", "videos_dir", "configs_dir", "data_dir", "models_dir")
     @classmethod

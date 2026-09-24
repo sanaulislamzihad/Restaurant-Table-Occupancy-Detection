@@ -24,11 +24,12 @@ def main() -> int:
     if args.video:
         os.environ["DEFAULT_VIDEO_ID"] = args.video  # read by the settings below
 
+    from app.logging_setup import setup_logging
     from app.settings import get_settings
 
     settings = get_settings()
-    logger.remove()
-    logger.add(sys.stderr, level=settings.log_level)
+    log_file = setup_logging(settings)
+    logger.info("Logging to {}", log_file)
 
     from app.main import app, shutdown_requested
 
@@ -42,6 +43,7 @@ def main() -> int:
         host=settings.api_host,
         port=settings.api_port,
         log_level=settings.log_level.lower(),
+        log_config=None,  # uvicorn's logs go through loguru (see logging_setup.py)
         timeout_graceful_shutdown=5,
     )
     try:

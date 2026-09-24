@@ -243,7 +243,8 @@ def create_app(
         library: VideoLibrary = request.app.state.library
         path = library.path(body.video_id)
         if path is None:
-            raise HTTPException(404, "No such video.")
+            available = ", ".join(video["id"] for video in library.list()) or "none, upload one first"
+            raise HTTPException(404, f"No video with id '{body.video_id}'. Available ids: {available}.")
         streams: StreamManager = request.app.state.streams
         streams.stop()  # the old video stops publishing before the pipeline switches to the new tables
         request.app.state.pipeline.activate(body.video_id)
@@ -252,8 +253,12 @@ def create_app(
 
     @app.post("/api/stream/stop", response_model=StreamStatusOut, tags=["stream"])
     def stop_stream(request: Request) -> StreamStatusOut:
-        """Stop the fake camera (MediaMTX keeps running)."""
-        request.app.state.streams.stop()
+        """Stop the fake camera (MediaMTX keeps running); the live view goes idle."""
+        streams: StreamManager = request.app.state.streams
+        pipeline: Pipeline = request.app.state.pipeline
+        if streams.video_id is not None and pipeline.video_id == streams.video_id:
+            pipeline.activate(None)  # first, so the reader does not report the stream as lost
+        streams.stop()
         return stream_status(request)
 
     @app.get("/api/stream/status", response_model=StreamStatusOut, tags=["stream"])

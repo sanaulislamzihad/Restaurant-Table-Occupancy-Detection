@@ -103,10 +103,20 @@ def test_start_switch_and_stop_the_fake_camera(app: App) -> None:
     status = app.client.post("/api/stream/stop").json()
     assert status["state"] == "stopped" and new_ffmpeg.terminated
     assert app.client.get("/api/stream/status").json()["state"] == "stopped"
+    health = app.client.get("/api/health").json()
+    assert health["video_id"] is None and health["source"] == "NO SOURCE"  # idle, not retrying
 
 
-def test_starting_an_unknown_video_is_a_404(app: App) -> None:
-    assert app.client.post("/api/stream/start", json={"video_id": "nope"}).status_code == 404
+def test_idle_until_a_stream_is_started(app: App) -> None:
+    health = app.client.get("/api/health").json()
+    assert health["video_id"] is None and health["source"] == "NO SOURCE"
+    assert app.client.get("/api/snapshot").status_code == 503
+
+
+def test_starting_an_unknown_video_is_a_404_listing_the_ids(app: App) -> None:
+    response = app.client.post("/api/stream/start", json={"video_id": "string"})
+    assert response.status_code == 404
+    assert "'string'" in response.json()["detail"] and "lobby" in response.json()["detail"]
     assert app.client.post("/api/stream/start", json={"video_id": "../x"}).status_code == 422
 
 

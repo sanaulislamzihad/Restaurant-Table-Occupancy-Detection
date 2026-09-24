@@ -18,7 +18,7 @@ import time
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import cv2
 import numpy as np
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 
 FALLBACK_FILE_FPS = 25.0  # used when a file does not report its frame rate
+RETRY_WARNING_INTERVAL_S = 60.0  # while retrying, repeat the warning at most this often
 _DEFAULT_PORTS = {"rtsp": 554, "rtsps": 322, "http": 80, "https": 443}
 
 
@@ -85,6 +86,36 @@ def is_reachable(url: str, timeout: float) -> bool:
         return False
 
 
+def stream_problem(url: str, timeout: float) -> str | None:
+    """Why a stream URL cannot give video right now, or None if it is worth opening.
+
+    Besides the TCP check, an rtsp:// URL is asked for its stream description
+    the way a player does. A 404 answer means nothing is published at that path
+    yet (for example the fake camera has not been started), and opening it with
+    OpenCV would only make FFmpeg print an error. Any other answer, including a
+    login request, is left to OpenCV.
+    """
+    if not is_reachable(url, timeout):
+        return "nothing answers at that address (camera or server not running?)"
+    parts = urlsplit(url)
+    if parts.scheme.lower() != "rtsp" or not parts.hostname:
+        return None
+    host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+    netloc = f"{host}:{parts.port}" if parts.port else host  # without user:password
+    request_url = urlunsplit(("rtsp", netloc, parts.path, parts.query, ""))
+    request = f"DESCRIBE {request_url} RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n"
+    try:
+        with socket.create_connection((parts.hostname, parts.port or 554), timeout=timeout) as connection:
+            connection.sendall(request.encode())
+            status_line = connection.recv(256).split(b"\r\n", 1)[0].decode("latin-1")
+    except OSError:
+        return None  # no clear answer: let OpenCV try
+    words = status_line.split()
+    if len(words) >= 2 and words[0].startswith("RTSP/") and words[1] == "404":
+        return "the server has no stream at this path (not started yet?)"
+    return None
+
+
 class FrameSource:
     """Latest-frame reader for a file, a stream URL or a webcam.
 
@@ -117,6 +148,9 @@ class FrameSource:
         self._status = SourceStatus.CONNECTING
         self._fps = 0.0
         self._resolution: tuple[int, int] | None = None
+        self._open_error = ""  # why the last open failed
+        self._failures = 0  # failed attempts since the source was last live
+        self._last_retry_warning = 0.0
 
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name=f"FrameSource {self._label}", daemon=True)
@@ -208,7 +242,7 @@ class FrameSource:
                             if self._kind is _Kind.FILE:
                                 self._set_status(SourceStatus.ENDED)
                                 return
-                            self._retry_later(f"Could not open {self._label}")
+                            self._retry_later(f"Could not open {self._label}: {self._open_error}")
                             continue
                         frames_since_open = 0
                         next_frame_at = time.monotonic()
@@ -242,12 +276,16 @@ class FrameSource:
                 cap.release()
 
     def _open(self) -> cv2.VideoCapture | None:
-        """Open the capture, or return None if that fails."""
+        """Open the capture, or return None (with the reason in _open_error) if that fails."""
         if self._kind is _Kind.WEBCAM:
+            self._open_error = "the webcam could not be opened"
             cap = cv2.VideoCapture(int(self.source))
         elif self._kind is _Kind.STREAM:
-            if not is_reachable(self.source, self._open_timeout_ms / 1000):
+            problem = stream_problem(self.source, self._open_timeout_ms / 1000)
+            if problem:
+                self._open_error = problem
                 return None
+            self._open_error = "the server answered but sent no video (wrong path or login?)"
             # Timeouts keep a dead or unreachable camera from blocking forever.
             cap = cv2.VideoCapture(
                 self.source,
@@ -261,6 +299,7 @@ class FrameSource:
             if not Path(self.source).is_file():
                 logger.error("Video file not found: {}", self.source)
                 return None
+            self._open_error = "the file could not be read as a video"
             cap = cv2.VideoCapture(self.source)
 
         if not cap.isOpened():
@@ -289,7 +328,9 @@ class FrameSource:
             if self._stop.is_set():
                 return
             if self._status is not SourceStatus.LIVE:
-                logger.info("{} is live", self._label)
+                again = f" again after {self._failures} failed attempt(s)" if self._failures else ""
+                logger.info("{} is live{}", self._label, again)
+                self._failures = 0
             self._frame = frame
             self._frame_seq += 1
             self._resolution = (frame.shape[1], frame.shape[0])
@@ -297,7 +338,17 @@ class FrameSource:
             self._cond.notify_all()
 
     def _retry_later(self, reason: str) -> None:
-        logger.warning("{}; retrying in {:g} s", reason, self._reconnect_seconds)
+        """Wait before the next attempt. Warns on the first failure, then only once a minute."""
+        if self._stop.is_set():  # being released: the lost connection is expected
+            return
+        self._failures += 1
+        now = time.monotonic()
+        if self._failures == 1 or now - self._last_retry_warning >= RETRY_WARNING_INTERVAL_S:
+            attempts = f" ({self._failures} attempts so far)" if self._failures > 1 else ""
+            logger.warning("{}{}; retrying every {:g} s", reason, attempts, self._reconnect_seconds)
+            self._last_retry_warning = now
+        else:
+            logger.debug("{}; retrying in {:g} s", reason, self._reconnect_seconds)
         self._set_status(SourceStatus.RECONNECTING)
         self._stop.wait(self._reconnect_seconds)
 

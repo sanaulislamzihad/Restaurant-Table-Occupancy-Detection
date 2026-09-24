@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import socket
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -9,8 +11,9 @@ from typing import Callable
 import cv2
 import numpy as np
 import pytest
+from loguru import logger
 
-from app.sources import FrameSource, SourceStatus, redact
+from app.sources import FrameSource, SourceStatus, redact, stream_problem
 
 FPS = 20
 FRAME_COUNT = 10
@@ -119,6 +122,61 @@ def test_unreachable_stream_keeps_retrying_and_releases_quickly() -> None:
         assert time.monotonic() - start < 5
     assert source.status is SourceStatus.STOPPED
     assert not source.is_alive()
+
+
+def test_retry_warnings_are_not_repeated_every_attempt() -> None:
+    warnings: list[str] = []
+    sink = logger.add(lambda message: warnings.append(message), level="WARNING", format="{message}")
+    source = FrameSource("rtsp://127.0.0.1:9/cam", reconnect_seconds=0.05, open_timeout_seconds=0.2)
+    try:
+        assert wait_until(lambda: source._failures >= 5, timeout=15)
+    finally:
+        source.release()
+        logger.remove(sink)
+    retry_warnings = [w for w in warnings if "Could not open" in w]
+    assert len(retry_warnings) == 1  # once, not every 0.05 s
+    assert "nothing answers at that address" in retry_warnings[0]
+
+
+class FakeRtspServer:
+    """Answers every request with one fixed RTSP status line."""
+
+    def __init__(self, status: str) -> None:
+        self._socket = socket.create_server(("127.0.0.1", 0))
+        self.url = f"rtsp://user:secret@127.0.0.1:{self._socket.getsockname()[1]}/cam1"
+        self.requests: list[bytes] = []
+        self._status = status
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                connection, _ = self._socket.accept()
+            except OSError:
+                return
+            with connection:
+                request = connection.recv(1024)
+                self.requests.append(request)
+                if request:  # a real request, not just a TCP check
+                    connection.sendall(f"RTSP/1.0 {self._status}\r\nCSeq: 1\r\n\r\n".encode())
+
+    def close(self) -> None:
+        self._socket.close()
+
+
+def test_stream_problem_explains_why_there_is_no_video() -> None:
+    assert "nothing answers" in stream_problem("rtsp://127.0.0.1:9/cam", timeout=1)
+
+    missing = FakeRtspServer("404 Not Found")
+    login = FakeRtspServer("401 Unauthorized")
+    try:
+        assert "no stream at this path" in stream_problem(missing.url, timeout=1)
+        assert stream_problem(login.url, timeout=1) is None  # left to OpenCV, which can log in
+        describe = next(r for r in missing.requests if r)
+        assert describe.startswith(b"DESCRIBE rtsp://127.0.0.1:") and b"secret" not in describe
+    finally:
+        missing.close()
+        login.close()
 
 
 def test_release_twice_is_safe(sample_video: Path) -> None:

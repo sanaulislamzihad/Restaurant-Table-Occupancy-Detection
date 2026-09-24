@@ -204,7 +204,8 @@ class Pipeline:
     def activate(self, video_id: str | None) -> None:
         """Watch a video: load its table config and switch to its source.
 
-        Without a config (or with video_id None) the fake camera URL is watched
+        With video_id None the pipeline is idle (no source, NO SOURCE on the
+        stream). A video without a config is watched on the fake camera URL
         with no tables. When the video changes, the source is reopened so no
         stale frame of the previous video is processed with the new tables.
         """
@@ -214,11 +215,15 @@ class Pipeline:
                 config = self._store.load(video_id)
             except (ValidationError, ValueError) as error:
                 logger.error("Table config of {} is invalid: {}", video_id, error)
-        source_url = (config.source if config else self.settings.fake_camera_rtsp_url).strip()
+        source_url = None
+        if video_id:
+            source_url = (config.source if config else self.settings.fake_camera_rtsp_url).strip()
 
         with self._lock:
             old_source = None
-            if self._source is None or self._source.source != source_url or video_id != self._video_id:
+            if source_url is None:
+                old_source, self._source, self._frame = self._source, None, None
+            elif self._source is None or self._source.source != source_url or video_id != self._video_id:
                 old_source = self._source
                 self._source = FrameSource.from_settings(source_url, self.settings)
                 self._frame = None
@@ -228,8 +233,11 @@ class Pipeline:
         if old_source is not None:
             # Closing can wait for a blocked read; do not hold up the caller.
             threading.Thread(target=old_source.release, name="release-old-source", daemon=True).start()
-        tables = f"{len(config.tables)} tables" if config else "no tables"
-        logger.info("Watching {} from {} ({})", video_id or "no video", redact(source_url), tables)
+        if source_url is None:
+            logger.info("No video selected; waiting for a stream to be started")
+        else:
+            tables = f"{len(config.tables)} tables" if config else "no tables"
+            logger.info("Watching {} from {} ({})", video_id, redact(source_url), tables)
         self._publish_status(force=True)
 
     def current_config(self) -> TableConfig | None:
@@ -421,6 +429,7 @@ class Pipeline:
                 if current_generation != generation:  # another video: start tracking from scratch
                     generation, tracker, tracker_config, tracker_size = current_generation, None, None, None
                     detector.reset_tracking()
+                    last_fps_log = time.monotonic()  # first speed report after a full interval
 
                 size = (frame.shape[1], frame.shape[0])
                 if config is None or not config.tables:

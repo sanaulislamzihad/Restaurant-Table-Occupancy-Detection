@@ -173,7 +173,9 @@ class VideoOut(BaseModel):
 class StreamStartIn(BaseModel):
     """Body of POST /api/stream/start."""
 
-    video_id: str = Field(pattern=ID_PATTERN)
+    model_config = {"json_schema_extra": {"examples": [{"video_id": "restaurant"}]}}
+
+    video_id: str = Field(pattern=ID_PATTERN, description="id from GET /api/videos")
 
 
 class StreamStatusOut(BaseModel):

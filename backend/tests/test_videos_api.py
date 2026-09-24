@@ -151,8 +151,10 @@ def test_deleting_the_streaming_video_stops_it_and_removes_everything(app: App) 
         occupancy=OccupancySettings(confidence_threshold=0.1, enter_seconds=0, leave_seconds=10),
     ))
     app.client.post("/api/stream/start", json={"video_id": video["id"]})
+    assert [v["id"] for v in app.client.get("/api/analytics/videos").json()] == [video["id"]]
 
     assert app.client.delete(f"/api/videos/{video['id']}").status_code == 204
+    assert app.client.get("/api/analytics/videos").json() == []  # its history is gone too
     assert app.popen.ffmpeg()[-1].terminated
     assert app.client.get("/api/stream/status").json()["state"] == "stopped"
     assert app.client.get("/api/health").json()["video_id"] is None

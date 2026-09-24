@@ -230,7 +230,7 @@ class VideoLibrary:
         return added
 
     def delete(self, video_id: str) -> bool:
-        """Remove a video's file, thumbnail, table config and database row."""
+        """Remove a video's file, thumbnail, table config, database row and history."""
         video = self.get(video_id)
         if video is None:
             return False

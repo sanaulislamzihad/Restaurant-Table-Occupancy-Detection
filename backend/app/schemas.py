@@ -194,6 +194,54 @@ class EditorFrameOut(BaseModel):
     hints_error: str | None = Field(default=None, description="why people and tables could not be found")
 
 
+class TableAnalyticsOut(BaseModel):
+    """Occupancy totals of one table in the chosen time range."""
+
+    id: str
+    name: str
+    occupied_seconds: float
+    session_count: int
+    average_session_seconds: float | None
+    longest_session_seconds: float | None
+    occupancy_rate: float | None = Field(description="occupied time / monitored time, 0 to 1")
+
+
+class OccupancyPointOut(BaseModel):
+    """One point of the occupancy-over-time chart."""
+
+    start: float
+    end: float
+    monitored_seconds: float = Field(description="how much of this interval the video was watched")
+    occupancy_rate: float | None = Field(description="share of table time occupied, 0 to 1; None if not watched")
+    occupied_tables: float | None = Field(description="average number of occupied tables")
+
+
+class AnalyticsOut(BaseModel):
+    """GET /api/analytics: occupied time and sessions per table, and occupancy over time."""
+
+    video_id: str | None
+    since: float | None
+    until: float
+    bucket_seconds: int
+    monitored_seconds: float = Field(description="time the video was watched with its tables in this range")
+    table_count: int
+    session_count: int
+    average_occupancy: float | None = Field(description="share of table time occupied, 0 to 1")
+    tables: list[TableAnalyticsOut]
+    timeline: list[OccupancyPointOut]
+
+
+class MonitoredVideoOut(BaseModel):
+    """A video with recorded monitoring time, for choosing what to analyse."""
+
+    id: str
+    name: str
+    monitored_seconds: float
+    first_started: float
+    last_ended: float
+    is_live: bool
+
+
 class StreamStartIn(BaseModel):
     """Body of POST /api/stream/start."""
 

@@ -50,6 +50,7 @@ STATUS_HEARTBEAT_SECONDS = 1.0  # status is pushed at least this often
 FPS_LOG_SECONDS = 10.0
 IDLE_REDRAW_SECONDS = 0.5  # while no frames arrive, redraw the last one so the overlay shows the source status
 PLACEHOLDER_SHAPE = (360, 640, 3)  # image shown before the first frame arrives
+RUN_HEARTBEAT_SECONDS = 10.0  # how often a run's last_seen_at is updated
 
 
 class Detector(Protocol):
@@ -124,6 +125,9 @@ class Pipeline:
         self._config: TableConfig | None = None
         self._source: FrameSource | None = None
         self._generation = 0
+        # The open monitoring run (see db.py): (run id, video id), while a video with tables is watched.
+        self._run: tuple[int, str] | None = None
+        self._run_heartbeat = 0.0
 
         # Latest data.
         self._frame: np.ndarray | None = None
@@ -143,6 +147,9 @@ class Pipeline:
 
     def start(self, video_id: str | None = None) -> None:
         """Start watching video_id (None: the fake camera with no tables) and start both threads."""
+        closed = self._db.close_unfinished_runs()
+        if closed:
+            logger.info("Closed {} monitoring run(s) left open by the last shutdown", closed)
         self.activate(video_id)
         for target, name in ((self._frame_loop, "pipeline-frames"), (self._detection_loop, "pipeline-detection")):
             thread = threading.Thread(target=target, name=name, daemon=True)
@@ -160,6 +167,8 @@ class Pipeline:
         for thread in self._threads:
             thread.join(timeout=10)
         self._threads.clear()
+        with self._lock:
+            self._sync_run(new_run=False)
         logger.info("Pipeline stopped")
 
     @property
@@ -225,6 +234,7 @@ class Pipeline:
             self._video_id, self._config = video_id, config
             self._generation += 1
             self._results = Results()
+            self._sync_run(new_run=True)  # occupancy starts over, and so does the run
         if old_source is not None:
             # Closing can wait for a blocked read; do not hold up the caller.
             threading.Thread(target=old_source.release, name="release-old-source", daemon=True).start()
@@ -253,8 +263,41 @@ class Pipeline:
         with self._lock:
             if self._video_id == video_id:
                 self._config = new_config  # the detection thread picks it up on its next frame
+                self._sync_run(new_run=False)
         logger.info("Saved {} tables for {}", len(new_config.tables), video_id)
         return new_config
+
+    def _sync_run(self, new_run: bool) -> None:
+        """Keep one open run while a video with tables is watched (call with the lock held).
+
+        ``new_run`` ends the current run and starts another, for when occupancy
+        starts over. Database errors are logged, never raised: they must not
+        stop the live view.
+        """
+        now = time.time()
+        watched = self._video_id if (self._config and self._config.tables and not self._stop.is_set()) else None
+        try:
+            if self._run and (new_run or self._run[1] != watched):
+                self._db.end_run(self._run[0], now)
+                self._run = None
+            if watched and self._run is None:
+                self._run = (self._db.start_run(watched, now), watched)
+                self._run_heartbeat = time.monotonic()
+        except Exception:
+            logger.exception("Could not record the monitoring run")
+
+    def _touch_run(self) -> None:
+        """Update the open run's heartbeat every RUN_HEARTBEAT_SECONDS."""
+        if time.monotonic() - self._run_heartbeat < RUN_HEARTBEAT_SECONDS:
+            return
+        with self._lock:
+            run = self._run
+            self._run_heartbeat = time.monotonic()
+        if run:
+            try:
+                self._db.touch_run(run[0], time.time())
+            except Exception:
+                logger.exception("Could not update the monitoring run")
 
     # ------------------------------------------------------------------ data for the API
 
@@ -345,6 +388,7 @@ class Pipeline:
                     self._render(last_frame)  # keeps the overlay (RECONNECTING, clock) up to date
                     last_render = time.monotonic()
                 self._publish_status()
+                self._touch_run()
             except Exception:  # keep streaming whatever happens to one frame
                 logger.exception("Frame thread error")
                 self._stop.wait(1.0)

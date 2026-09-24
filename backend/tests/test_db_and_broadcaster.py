@@ -56,3 +56,18 @@ def test_slow_subscriber_keeps_only_the_newest_messages() -> None:
     size, oldest = asyncio.run(scenario())
     assert size == QUEUE_SIZE
     assert oldest == {"n": 10}  # the 10 oldest were dropped
+
+
+def test_runs_left_open_by_a_crash_end_at_their_last_heartbeat(tmp_path: Path) -> None:
+    db = Database(tmp_path / "app.db")
+    finished = db.start_run("a", 100)
+    db.end_run(finished, 160)
+    crashed = db.start_run("a", 200)
+    db.touch_run(crashed, 230)
+    assert db.runs_between("a", 0, 1000, now=500) == [(100, 160), (200, 500)]  # still open: ends "now"
+    assert db.close_unfinished_runs() == 1
+    assert db.runs_between("a", 0, 1000, now=500) == [(100, 160), (200, 230)]
+    assert db.runs_between("a", 170, 190, now=500) == []
+    videos = db.monitored_videos(now=500)
+    assert videos[0]["video_id"] == "a" and videos[0]["monitored_seconds"] == 90
+    db.close()

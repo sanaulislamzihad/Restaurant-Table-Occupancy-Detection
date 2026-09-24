@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import threading
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -21,15 +22,18 @@ from loguru import logger
 from pydantic import ValidationError
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.analytics import compute_analytics
 from app.broadcaster import Broadcaster
 from app.config_store import ConfigError, ConfigStore, build_table_config
 from app.db import Database
 from app.pipeline import Detector, Pipeline
 from app.scene_hints import SceneAnalyzer, SceneHints
 from app.schemas import (
+    AnalyticsOut,
     EditorFrameOut,
     EventOut,
     HealthOut,
+    MonitoredVideoOut,
     StreamStartIn,
     StreamStatusOut,
     TableConfig,
@@ -242,7 +246,7 @@ def create_app(
     @app.delete("/api/videos/{video_id}", status_code=204, tags=["videos"],
                 responses={404: {"description": "No such video"}})
     def delete_video(request: Request, video_id: str) -> Response:
-        """Delete a video with its thumbnail and table config (stops its stream first)."""
+        """Delete a video with its thumbnail, table config and analytics history (stops its stream first)."""
         library: VideoLibrary = request.app.state.library
         streams: StreamManager = request.app.state.streams
         pipeline: Pipeline = request.app.state.pipeline
@@ -424,6 +428,57 @@ def create_app(
             suggested_tables=suggested,
             hints_error=hints_error,
         )
+
+    # ------------------------------------------------------------------ analytics
+
+    @app.get("/api/analytics/videos", response_model=list[MonitoredVideoOut], tags=["analytics"])
+    def analytics_videos(request: Request) -> list[MonitoredVideoOut]:
+        """Videos that have been watched with tables, most recent first."""
+        library: VideoLibrary = request.app.state.library
+        live_id = request.app.state.pipeline.video_id
+        return [
+            MonitoredVideoOut(
+                id=row["video_id"],
+                name=(video["original_name"] if (video := library.get(row["video_id"])) else row["video_id"]),
+                monitored_seconds=round(row["monitored_seconds"], 1),
+                first_started=row["first_started"],
+                last_ended=row["last_ended"],
+                is_live=row["video_id"] == live_id,
+            )
+            for row in request.app.state.db.monitored_videos(time.time())
+        ]
+
+    @app.get("/api/analytics", response_model=AnalyticsOut, tags=["analytics"])
+    def analytics(
+        request: Request,
+        video_id: str | None = Query(None, description="default: the live video, else the last one watched"),
+        since: float | None = Query(None, description="Unix time; default: when the video was first watched"),
+        until: float | None = Query(None, description="Unix time; default: now"),
+        bucket_seconds: int | None = Query(None, ge=10, le=86400, description="chart step; default: automatic"),
+    ) -> dict:
+        """Occupied time and sessions per table, and occupancy over time, from the stored status changes."""
+        db: Database = request.app.state.db
+        now = time.time()
+        until = min(until, now) if until is not None else now
+        watched = db.monitored_videos(now)
+        if video_id is None:
+            live_id = request.app.state.pipeline.video_id
+            video_id = live_id if any(row["video_id"] == live_id for row in watched) else (
+                watched[0]["video_id"] if watched else None
+            )
+        first = next((row["first_started"] for row in watched if row["video_id"] == video_id), None)
+        if video_id is None or first is None:
+            return {**compute_analytics([], [], [], until, until), "video_id": video_id, "since": since}
+        since = first if since is None else since
+        if since >= until:
+            raise HTTPException(422, "since must be before until.")
+
+        runs = db.runs_between(video_id, since, until, now)
+        events = db.events_between(video_id, runs[0][0], until) if runs else []
+        config = config_of(request, video_id)
+        tables = [(table.id, table.name) for table in config.tables] if config else []
+        result = compute_analytics(events, runs, tables, since, until, bucket_seconds)
+        return {**result, "video_id": video_id}
 
     # ------------------------------------------------------------------ WebSocket
 

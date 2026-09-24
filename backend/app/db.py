@@ -1,4 +1,4 @@
-"""SQLite storage: table status-change events and uploaded video metadata.
+"""SQLite storage: table status-change events, monitoring runs and uploaded video metadata.
 
 One connection shared by the pipeline thread and the API, guarded by a lock.
 """
@@ -23,6 +23,18 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_by_time ON events (timestamp);
 CREATE INDEX IF NOT EXISTS events_by_video ON events (video_id, timestamp);
+
+-- A run is a stretch of time in which the pipeline watched a video that has
+-- tables. Occupancy starts from AVAILABLE at the start of every run, and a run
+-- ends a table's open session, so analytics never count time nobody watched.
+CREATE TABLE IF NOT EXISTS runs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id      TEXT NOT NULL,
+    started_at    REAL NOT NULL,
+    ended_at      REAL,             -- NULL while the run is going on
+    last_seen_at  REAL NOT NULL     -- heartbeat: the end of a run cut off by a crash
+);
+CREATE INDEX IF NOT EXISTS runs_by_video ON runs (video_id, started_at);
 
 CREATE TABLE IF NOT EXISTS videos (
     id                TEXT PRIMARY KEY,
@@ -77,6 +89,15 @@ class Database:
                 rows.append({"id": cursor.lastrowid, **row})
         return rows
 
+    def events_between(self, video_id: str, since: float, until: float) -> list[dict]:
+        """Events of one video from since to until, oldest first."""
+        with self._lock:
+            return [dict(row) for row in self._conn.execute(
+                "SELECT * FROM events WHERE video_id = ? AND timestamp >= ? AND timestamp <= ? "
+                "ORDER BY timestamp, id",
+                (video_id, since, until),
+            )]
+
     def recent_events(self, limit: int = 50, video_id: str | None = None) -> list[dict]:
         """Newest events first, optionally for one video only."""
         query = "SELECT * FROM events"
@@ -87,6 +108,54 @@ class Database:
         query += " ORDER BY id DESC LIMIT ?"
         with self._lock:
             return [dict(row) for row in self._conn.execute(query, (*params, limit))]
+
+    # ------------------------------------------------------------------ runs
+
+    def start_run(self, video_id: str, now: float) -> int:
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO runs (video_id, started_at, last_seen_at) VALUES (?, ?, ?)", (video_id, now, now)
+            )
+            return int(cursor.lastrowid)
+
+    def touch_run(self, run_id: int, now: float) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE runs SET last_seen_at = ? WHERE id = ? AND ended_at IS NULL", (now, run_id))
+
+    def end_run(self, run_id: int, now: float) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE runs SET ended_at = ?, last_seen_at = ? WHERE id = ? AND ended_at IS NULL", (now, now, run_id)
+            )
+
+    def close_unfinished_runs(self) -> int:
+        """End runs left open by a crash at their last heartbeat. Returns how many."""
+        with self._lock, self._conn:
+            return self._conn.execute("UPDATE runs SET ended_at = last_seen_at WHERE ended_at IS NULL").rowcount
+
+    def runs_between(self, video_id: str, since: float, until: float, now: float) -> list[tuple[float, float]]:
+        """(start, end) of the video's runs that overlap since..until, oldest first.
+
+        A run still going on ends at ``now``.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT started_at, COALESCE(ended_at, ?) AS ended FROM runs "
+                "WHERE video_id = ? AND started_at <= ? AND COALESCE(ended_at, ?) >= ? ORDER BY started_at",
+                (now, video_id, until, now, since),
+            ).fetchall()
+        return [(row["started_at"], row["ended"]) for row in rows]
+
+    def monitored_videos(self, now: float) -> list[dict]:
+        """Videos with recorded runs: id, first start, last end and total watched seconds."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT video_id, MIN(started_at) AS first_started, MAX(COALESCE(ended_at, ?)) AS last_ended, "
+                "SUM(COALESCE(ended_at, ?) - started_at) AS monitored_seconds "
+                "FROM runs GROUP BY video_id ORDER BY last_ended DESC",
+                (now, now),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     # ------------------------------------------------------------------ videos
 
@@ -109,7 +178,10 @@ class Database:
         return dict(row) if row else None
 
     def delete_video(self, video_id: str) -> bool:
+        """Remove a video with its events and runs."""
         with self._lock, self._conn:
+            self._conn.execute("DELETE FROM events WHERE video_id = ?", (video_id,))
+            self._conn.execute("DELETE FROM runs WHERE video_id = ?", (video_id,))
             return self._conn.execute("DELETE FROM videos WHERE id = ?", (video_id,)).rowcount > 0
 
     def close(self) -> None:

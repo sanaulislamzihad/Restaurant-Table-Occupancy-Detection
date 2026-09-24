@@ -132,3 +132,35 @@ def test_mjpeg_stream_parts(client: TestClient) -> None:
     part = asyncio.run(first_part())
     assert part.startswith(b"--frame\r\nContent-Type: image/jpeg\r\n")
     assert b"\r\n\r\n\xff\xd8" in part  # JPEG data follows the part headers
+
+
+def test_runs_are_recorded_and_analytics_count_the_occupied_time(client: TestClient) -> None:
+    wait_until(lambda: table_status(client).get("T1") == "OCCUPIED")
+    time.sleep(1.0)
+    watched = client.get("/api/analytics/videos").json()
+    assert [(v["id"], v["name"], v["is_live"]) for v in watched] == [("demo", "demo", True)]
+
+    result = client.get("/api/analytics").json()  # the live video by default
+    assert result["video_id"] == "demo" and result["table_count"] == 1
+    table = result["tables"][0]
+    assert table["name"] == "Table 1" and table["session_count"] == 1
+    assert 0.5 < table["occupied_seconds"] <= result["monitored_seconds"]  # the person never leaves
+    assert result["average_occupancy"] > 0.5
+    assert result["timeline"] and result["timeline"][-1]["occupied_tables"] > 0
+
+    since = result["until"] + 5
+    assert client.get("/api/analytics", params={"since": since}).status_code == 422
+    empty = client.get("/api/analytics", params={"video_id": "nothing"}).json()
+    assert empty["video_id"] == "nothing" and empty["tables"] == [] and empty["timeline"] == []
+
+
+def test_a_new_run_starts_when_the_video_is_restarted(client: TestClient) -> None:
+    pipeline = client.app.state.pipeline
+    db = client.app.state.db
+    first_run = pipeline._run
+    pipeline.activate("demo")  # watching again: occupancy starts over
+    assert pipeline._run != first_run
+    pipeline.activate(None)  # idle: no run
+    assert pipeline._run is None
+    runs = db.runs_between("demo", 0, time.time(), time.time())
+    assert len(runs) == 2 and all(end >= start for start, end in runs)

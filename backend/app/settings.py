@@ -1,0 +1,77 @@
+"""Application settings.
+
+Every value comes from the environment or from the .env files in backend/:
+.env.example provides the defaults and .env (if present) overrides them, so no
+path, URL or port is hardcoded in the code. Relative paths are resolved from
+the backend/ folder, whatever the current working directory is.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+
+
+class Settings(BaseSettings):
+    """Typed view of backend/.env (see .env.example for what each value means)."""
+
+    model_config = SettingsConfigDict(
+        env_file=(BACKEND_DIR / ".env.example", BACKEND_DIR / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # API server
+    api_host: str
+    api_port: int = Field(ge=1, le=65535)
+    cors_origins: str
+    log_level: str
+    log_dir: Path
+
+    # External tools
+    ffmpeg_path: str
+    ffprobe_path: str
+    mediamtx_path: str
+    mediamtx_config: Path
+    manage_mediamtx: bool
+
+    # Fake CCTV camera
+    fake_camera_rtsp_url: str
+
+    # Storage
+    videos_dir: Path
+    configs_dir: Path
+    data_dir: Path
+    max_upload_mb: int = Field(gt=0)
+
+    # Detection
+    yolo_model: str
+    device: str
+    detect_every_n_frames: int = Field(ge=1)
+
+    # Video source
+    source_reconnect_seconds: float = Field(gt=0)
+    source_open_timeout_seconds: float = Field(gt=0)
+    source_read_timeout_seconds: float = Field(gt=0)
+    loop_video_files: bool
+
+    @field_validator("log_dir", "mediamtx_config", "videos_dir", "configs_dir", "data_dir")
+    @classmethod
+    def _resolve_from_backend_dir(cls, value: Path) -> Path:
+        return (BACKEND_DIR / value).resolve()
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """CORS_ORIGINS split into a list."""
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Load the settings once and reuse them."""
+    return Settings()  # type: ignore[call-arg]  # values come from the .env files

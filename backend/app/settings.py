@@ -51,7 +51,10 @@ class Settings(BaseSettings):
 
     # Detection
     yolo_model: str
+    models_dir: Path
     device: str
+    yolo_img_size: int = Field(ge=32)
+    confidence_threshold: float = Field(ge=0, le=1)
     detect_every_n_frames: int = Field(ge=1)
 
     # Video source
@@ -60,10 +63,18 @@ class Settings(BaseSettings):
     source_read_timeout_seconds: float = Field(gt=0)
     loop_video_files: bool
 
-    @field_validator("log_dir", "mediamtx_config", "videos_dir", "configs_dir", "data_dir")
+    @field_validator("log_dir", "mediamtx_config", "videos_dir", "configs_dir", "data_dir", "models_dir")
     @classmethod
     def _resolve_from_backend_dir(cls, value: Path) -> Path:
         return (BACKEND_DIR / value).resolve()
+
+    @property
+    def yolo_model_path(self) -> Path:
+        """YOLO_MODEL as a path: a bare file name lives in MODELS_DIR."""
+        model = Path(self.yolo_model)
+        if model.parent == Path("."):
+            return self.models_dir / model
+        return (BACKEND_DIR / model).resolve()
 
     @property
     def cors_origin_list(self) -> list[str]:

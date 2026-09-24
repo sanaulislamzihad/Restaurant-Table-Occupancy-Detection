@@ -20,6 +20,7 @@ from fractions import Fraction
 from pathlib import Path
 
 import cv2
+import numpy as np
 from fastapi import UploadFile
 from loguru import logger
 
@@ -103,6 +104,24 @@ def probe_video(path: Path, ffprobe: str | None) -> VideoInfo | None:
             fps=round(fps, 3) if fps > 0 else None,
             codec=None,
         )
+    finally:
+        capture.release()
+
+
+def read_frame(video: Path, at_seconds: float = 0.0) -> np.ndarray | None:
+    """The frame at ``at_seconds`` (the first frame if the video is shorter), or None."""
+    capture = cv2.VideoCapture(str(video))
+    try:
+        if not capture.isOpened():
+            return None
+        if at_seconds > 0:
+            capture.set(cv2.CAP_PROP_POS_MSEC, at_seconds * 1000)
+            ok, frame = capture.read()
+            if ok and frame is not None:
+                return frame
+            capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        ok, frame = capture.read()
+        return frame if ok else None
     finally:
         capture.release()
 

@@ -177,6 +177,23 @@ class UploadLimitsOut(BaseModel):
     extensions: list[str]
 
 
+class EditorFrameOut(BaseModel):
+    """A frame to draw tables on, with help for drawing them.
+
+    All points are in pixels of this frame (frame_width x frame_height).
+    """
+
+    video_id: str
+    image: str = Field(description="the frame as a data:image/jpeg;base64 URL")
+    frame_width: int
+    frame_height: int
+    live: bool = Field(description="taken from the live stream (else from the video file)")
+    at_seconds: float | None = Field(description="position in the video file, None for a live frame")
+    people: list[Point] = Field(description="reference point of every person in the frame")
+    suggested_tables: list[list[Point]] = Field(description="table outlines found in the frame")
+    hints_error: str | None = Field(default=None, description="why people and tables could not be found")
+
+
 class StreamStartIn(BaseModel):
     """Body of POST /api/stream/start."""
 

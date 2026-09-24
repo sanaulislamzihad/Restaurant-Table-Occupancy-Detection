@@ -7,11 +7,13 @@ the API docs are then at http://<API_HOST>:<API_PORT>/docs.
 from __future__ import annotations
 
 import asyncio
+import base64
 import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
+import cv2
 from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -20,10 +22,12 @@ from pydantic import ValidationError
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.broadcaster import Broadcaster
-from app.config_store import ConfigStore
+from app.config_store import ConfigError, ConfigStore, build_table_config
 from app.db import Database
-from app.pipeline import ConfigError, Detector, Pipeline
+from app.pipeline import Detector, Pipeline
+from app.scene_hints import SceneAnalyzer, SceneHints
 from app.schemas import (
+    EditorFrameOut,
     EventOut,
     HealthOut,
     StreamStartIn,
@@ -36,7 +40,7 @@ from app.schemas import (
 )
 from app.settings import Settings, get_settings
 from app.stream_manager import StreamManager
-from app.videos import ALLOWED_EXTENSIONS, VideoError, VideoLibrary
+from app.videos import ALLOWED_EXTENSIONS, VideoError, VideoLibrary, read_frame
 
 # Set when the server is asked to stop (Ctrl+C), so endless MJPEG streams and
 # WebSocket loops end and the shutdown does not hang on open browser tabs.
@@ -46,6 +50,7 @@ MJPEG_BOUNDARY = "frame"
 DB_FILENAME = "app.db"
 UPLOAD_PATH = "/api/videos"
 MULTIPART_OVERHEAD_BYTES = 64 * 1024  # form headers around the file in an upload
+EDITOR_JPEG_QUALITY = 90
 
 
 async def mjpeg_parts(pipeline: Pipeline) -> AsyncIterator[bytes]:
@@ -81,9 +86,12 @@ def create_app(
     settings: Settings | None = None,
     detector_factory: Callable[[Settings], Detector] | None = None,
     popen: Callable[..., Any] | None = None,
+    hints_factory: Callable[[Settings], SceneHints] | None = None,
 ) -> FastAPI:
-    """Build the app. Tests pass their own settings, a fake detector and a fake process launcher."""
+    """Build the app. Tests pass their own settings, fake detectors and a fake process launcher."""
     settings = settings or get_settings()
+    hints_factory = hints_factory or SceneAnalyzer.from_settings
+    hints_lock = threading.Lock()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -97,6 +105,7 @@ def create_app(
                             **({"detector_factory": detector_factory} if detector_factory else {}))
         app.state.store, app.state.db, app.state.library = store, db, library
         app.state.streams, app.state.broadcaster, app.state.pipeline = streams, broadcaster, pipeline
+        app.state.hints = None  # loaded when the table editor first asks for it
         shutdown_requested.clear()
 
         await asyncio.to_thread(streams.ensure_mediamtx)
@@ -158,6 +167,12 @@ def create_app(
             is_streaming=streams.state.value == "running" and streams.video_id == video["id"],
             thumbnail_url=f"/api/videos/{video['id']}/thumbnail",
         )
+
+    def scene_hints(request: Request) -> SceneHints:
+        with hints_lock:  # two editor tabs must not load the model twice
+            if request.app.state.hints is None:
+                request.app.state.hints = hints_factory(settings)
+            return request.app.state.hints
 
     def stream_status(request: Request) -> StreamStatusOut:
         status = request.app.state.streams.status()
@@ -328,6 +343,87 @@ def create_app(
             return request.app.state.pipeline.update_tables(update)
         except ConfigError as error:
             raise HTTPException(422, str(error)) from error
+
+    @app.get("/api/videos/{video_id}/config", response_model=TableConfig, tags=["config"],
+             responses={404: {"description": "No such video, or no table config yet"}})
+    def video_config(request: Request, video_id: str) -> TableConfig:
+        """Table config of any uploaded video."""
+        if request.app.state.library.get(video_id) is None:
+            raise HTTPException(404, "No such video.")
+        config = config_of(request, video_id)
+        if config is None:
+            raise HTTPException(404, "This video has no table config yet.")
+        return config
+
+    @app.put("/api/videos/{video_id}/tables", response_model=TableConfig, tags=["config"],
+             responses={404: {"description": "No such video"}, 422: {"description": "Invalid tables"}})
+    def put_video_tables(request: Request, video_id: str, update: TablesUpdate) -> TableConfig:
+        """Save table outlines for any video. If it is the live video, the live view uses them at once."""
+        if request.app.state.library.get(video_id) is None:
+            raise HTTPException(404, "No such video.")
+        pipeline: Pipeline = request.app.state.pipeline
+        try:
+            if pipeline.video_id == video_id:
+                return pipeline.update_tables(update)
+            config = build_table_config(video_id, update, config_of(request, video_id),
+                                        settings.fake_camera_rtsp_url, settings)
+        except ConfigError as error:
+            raise HTTPException(422, str(error)) from error
+        request.app.state.store.save(config)
+        logger.info("Saved {} table(s) for {}", len(config.tables), video_id)
+        return config
+
+    @app.get("/api/videos/{video_id}/editor-frame", response_model=EditorFrameOut, tags=["config"],
+             responses={404: {"description": "No such video"}, 422: {"description": "No frame could be read"}})
+    def editor_frame(
+        request: Request,
+        video_id: str,
+        at: float = Query(1.0, ge=0, description="position in the video file, in seconds"),
+        live: bool = Query(True, description="use the live frame when this video is streaming"),
+        hints: bool = Query(True, description="also find people and suggest table outlines"),
+    ) -> EditorFrameOut:
+        """A frame to draw the tables on, with people's reference points and suggested table outlines."""
+        path = request.app.state.library.path(video_id)
+        if path is None:
+            raise HTTPException(404, "No such video.")
+        pipeline: Pipeline = request.app.state.pipeline
+        frame = pipeline.latest_frame() if live and pipeline.video_id == video_id else None
+        is_live = frame is not None
+        if frame is None:
+            frame = read_frame(path, at)
+        if frame is None:
+            raise HTTPException(422, "No frame could be read from this video.")
+        encoded, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, EDITOR_JPEG_QUALITY])
+        if not encoded:
+            raise HTTPException(422, "The frame could not be encoded.")
+
+        people: list = []
+        suggested: list = []
+        hints_error = None
+        if hints:
+            config = config_of(request, video_id)
+            occupancy = config.occupancy if config else None
+            try:
+                people, suggested = scene_hints(request).analyze(
+                    frame,
+                    person_confidence=occupancy.confidence_threshold if occupancy else settings.confidence_threshold,
+                    reference_point=occupancy.reference_point if occupancy else settings.reference_point,
+                )
+            except Exception as error:  # the editor still works without hints
+                logger.warning("Could not find people and tables in the frame: {}", error)
+                hints_error = f"People and tables could not be found: {error}"
+
+        return EditorFrameOut(
+            video_id=video_id,
+            image="data:image/jpeg;base64," + base64.b64encode(buffer.tobytes()).decode("ascii"),
+            frame_width=frame.shape[1],
+            frame_height=frame.shape[0],
+            live=is_live,
+            at_seconds=None if is_live else at,
+            people=people,
+            suggested_tables=suggested,
+            hints_error=hints_error,
+        )
 
     # ------------------------------------------------------------------ WebSocket
 

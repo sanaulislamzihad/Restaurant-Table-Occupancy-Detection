@@ -7,10 +7,55 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from app.schemas import ID_PATTERN, OccupancySettings, TableConfig
+from pydantic import ValidationError
+
+from app.geometry import outline_problem
+from app.schemas import ID_PATTERN, OccupancySettings, TableConfig, TablesUpdate
 
 if TYPE_CHECKING:
     from app.settings import Settings
+
+
+class ConfigError(ValueError):
+    """A table config change was rejected; the message says why."""
+
+
+def build_table_config(
+    video_id: str,
+    update: TablesUpdate,
+    existing: TableConfig | None,
+    source: str,
+    settings: Settings,
+    live_size: tuple[int, int] | None = None,
+) -> TableConfig:
+    """A checked config with new table outlines.
+
+    The existing config's source and occupancy settings are kept; a new config
+    gets ``source`` and the defaults from backend/.env. The frame size comes
+    from the update, else the live frame, else the existing config.
+    """
+    width = update.frame_width or (live_size[0] if live_size else existing.frame_width if existing else None)
+    height = update.frame_height or (live_size[1] if live_size else existing.frame_height if existing else None)
+    if width is None or height is None:
+        raise ConfigError("No frame received yet: send frame_width and frame_height with the tables.")
+    problems = [
+        f"{table.name}: {problem}"
+        for table in update.tables
+        if (problem := outline_problem(table.polygon, (width, height)))
+    ]
+    if problems:
+        raise ConfigError("Unusable table outline. " + "; ".join(problems))
+    try:
+        return TableConfig(
+            video_id=video_id,
+            source=existing.source if existing else source,
+            frame_width=width,
+            frame_height=height,
+            tables=update.tables,
+            occupancy=existing.occupancy if existing else default_occupancy(settings),
+        )
+    except ValidationError as error:
+        raise ConfigError(str(error)) from error
 
 
 def default_occupancy(settings: Settings) -> OccupancySettings:

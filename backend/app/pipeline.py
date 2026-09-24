@@ -30,10 +30,9 @@ from pydantic import ValidationError
 
 from app.annotator import FrameAnnotator, source_label
 from app.broadcaster import Broadcaster
-from app.config_store import ConfigStore, default_occupancy
+from app.config_store import ConfigError, ConfigStore, build_table_config
 from app.db import Database
 from app.detector import PersonDetector
-from app.geometry import outline_problem
 from app.occupancy import OccupancyTracker, TableState
 from app.schemas import (
     EventOut,
@@ -62,10 +61,6 @@ class Detector(Protocol):
     def detect(self, frame: np.ndarray) -> sv.Detections: ...
 
     def reset_tracking(self) -> None: ...
-
-
-class ConfigError(ValueError):
-    """A table config change was rejected; the message says why."""
 
 
 @dataclass(frozen=True)
@@ -251,29 +246,8 @@ class Pipeline:
             source_url = self._source.source if self._source else self.settings.fake_camera_rtsp_url
         if video_id is None:
             raise ConfigError("No video is active. Start a stream first.")
-
-        width = update.frame_width or (frame.shape[1] if frame is not None else config.frame_width if config else None)
-        height = update.frame_height or (frame.shape[0] if frame is not None else config.frame_height if config else None)
-        if width is None or height is None:
-            raise ConfigError("No frame received yet: send frame_width and frame_height with the tables.")
-        problems = [
-            f"{table.name}: {problem}"
-            for table in update.tables
-            if (problem := outline_problem(table.polygon, (width, height)))
-        ]
-        if problems:
-            raise ConfigError("Unusable table outline. " + "; ".join(problems))
-        try:
-            new_config = TableConfig(
-                video_id=video_id,
-                source=config.source if config else source_url,
-                frame_width=width,
-                frame_height=height,
-                tables=update.tables,
-                occupancy=config.occupancy if config else default_occupancy(self.settings),
-            )
-        except ValidationError as error:
-            raise ConfigError(str(error)) from error
+        live_size = (frame.shape[1], frame.shape[0]) if frame is not None else None
+        new_config = build_table_config(video_id, update, config, source_url, self.settings, live_size)
 
         self._store.save(new_config)
         with self._lock:
@@ -288,6 +262,11 @@ class Pipeline:
         """(sequence number, newest annotated JPEG)."""
         with self._lock:
             return self._jpeg_seq, self._jpeg
+
+    def latest_frame(self) -> np.ndarray | None:
+        """A copy of the newest raw frame, or None before the first frame."""
+        with self._lock:
+            return None if self._frame is None else self._frame.copy()
 
     def snapshot_jpeg(self) -> bytes | None:
         """The newest raw (not annotated) frame as a JPEG, or None before the first frame."""

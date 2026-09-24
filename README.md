@@ -4,7 +4,7 @@ Detects whether each table in a restaurant is **AVAILABLE** or **OCCUPIED** from
 
 There is no live camera yet, so uploaded CCTV footage is played as a looping **fake RTSP camera** (MediaMTX + ffmpeg). The detection pipeline reads that RTSP stream exactly like a real camera, so moving to a real CCTV camera later is a config change, not a code change.
 
-> **Status:** work in progress. The fake RTSP camera, the frame reader, person detection with tracking and per-table occupancy work; the API and the dashboard are being built.
+> **Status:** work in progress. The fake RTSP camera, person detection with tracking, per-table occupancy and the backend API with an annotated live stream work; video upload and the dashboard are being built.
 
 ## How it works
 
@@ -181,6 +181,32 @@ The default detects about four times more people than `yolo11n`; the people it s
 
 How a table decides (`backend/app/occupancy.py`): a person counts as "at" a table when the bottom centre of their box (or its centre, see `reference_point`) is inside the table's outline. A table becomes OCCUPIED only after someone has been there continuously for `enter_seconds` (a passer-by does not count), and AVAILABLE only after it has been empty continuously for `leave_seconds`. Timing uses the clock, not the frame count, so it behaves the same at any frame rate. Detection gaps shorter than `presence_hold_seconds` (1 s) are ignored, because detections of a seated person flicker for a frame or two.
 
+### Backend API and live pipeline
+
+Start the fake camera, then the backend from the `backend` folder (virtual environment active):
+
+```bash
+cd backend
+python -m app --video restaurant      # watch the "restaurant" table config
+```
+
+`--video` chooses the table config, and with it the camera, to watch; `DEFAULT_VIDEO_ID` in `backend/.env` does the same without the flag. Host and port come from `API_HOST` and `API_PORT`. `Ctrl+C` stops everything within a second, even with browser tabs still streaming.
+
+Then open <http://127.0.0.1:8000/api/stream> for the annotated live video and <http://127.0.0.1:8000/docs> for the interactive API docs.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/health` | Pipeline, model, source and MediaMTX state, processing and stream FPS |
+| GET | `/api/stream` | Annotated live video (MJPEG, usable as `<img src>`) |
+| GET | `/api/snapshot` | One raw JPEG frame, e.g. for the table editor |
+| GET | `/api/tables` | Current status of every table |
+| GET | `/api/events?limit=50` | Recent table status changes, newest first (stored in SQLite) |
+| GET | `/api/config` | Table config of the active video |
+| PUT | `/api/config/tables` | Save new table outlines; the live view uses them at once |
+| WS | `/ws/status` | Pushes `{"type": "status", "data": ...}` on every change and every second, and `{"type": "event", "data": ...}` for each table status change |
+
+How it runs (`backend/app/pipeline.py`): a frame thread reads every frame, draws the latest results on it and keeps the newest JPEG, so the video stays smooth (~20 fps). A detection thread takes the newest frame and runs YOLO, tracking and the occupancy state machine as fast as the CPU allows (~6 fps with `yolo26s` on an i5-1235U), stores status changes in `backend/data/app.db` and pushes updates to WebSocket clients. Saving new table outlines keeps the state of tables whose ID stays the same, so an occupied table does not reset.
+
 ### Table config
 
 Each video or camera has its table layout in `backend/configs/<video_id>.json`:
@@ -228,6 +254,11 @@ python -m pytest backend
 │   └── videos/                # footage (gitignored)
 ├── backend/
 │   ├── app/                   # FastAPI application
+│   │   ├── __main__.py        # `python -m app`: runs the server
+│   │   ├── main.py            # API routes, MJPEG stream, WebSocket
+│   │   ├── pipeline.py        # live pipeline (frame + detection threads)
+│   │   ├── db.py              # SQLite event storage
+│   │   ├── broadcaster.py     # pushes status/events to WebSocket clients
 │   │   ├── settings.py        # typed settings from backend/.env
 │   │   ├── sources.py         # FrameSource: file / stream / webcam reader
 │   │   ├── detector.py        # PersonDetector: YOLO + ByteTrack
@@ -238,6 +269,7 @@ python -m pytest backend
 │   │   └── annotator.py       # draws tables, people and the status overlay
 │   ├── scripts/               # preview_source, preview_detection, draw_tables, preview_occupancy
 │   ├── models/                # YOLO weights, downloaded on first use (gitignored)
+│   ├── data/                  # SQLite database (gitignored)
 │   ├── configs/               # <video_id>.json table configs
 │   ├── tests/                 # pytest tests
 │   ├── requirements.txt       # pinned Python dependencies
